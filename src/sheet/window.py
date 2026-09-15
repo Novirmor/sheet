@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, Qt
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPoint, QSize, Qt
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QTableView,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
         self.summary_label = QLabel("Ready")
         self.statusBar().addWidget(self.position_label)
         self.statusBar().addPermanentWidget(self.summary_label)
+        self.statusBar().setSizeGripEnabled(False)
 
     def _build_actions(self) -> None:
         style = self.style()
@@ -168,10 +170,12 @@ class MainWindow(QMainWindow):
         self.select_all_action.triggered.connect(self.table.selectAll)
 
         self.bold_action = QAction("Bold", self)
+        self.bold_action.setToolTip("Bold (Ctrl+B)")
         self.bold_action.setShortcut(QKeySequence.StandardKey.Bold)
         self.bold_action.setCheckable(True)
         self.bold_action.toggled.connect(lambda checked: self._apply_format(bold=checked))
         self.italic_action = QAction("Italic", self)
+        self.italic_action.setToolTip("Italic (Ctrl+I)")
         self.italic_action.setShortcut(QKeySequence.StandardKey.Italic)
         self.italic_action.setCheckable(True)
         self.italic_action.toggled.connect(lambda checked: self._apply_format(italic=checked))
@@ -185,6 +189,7 @@ class MainWindow(QMainWindow):
             ("right", "Align right"),
         ):
             action = QAction(label, self)
+            action.setToolTip(label)
             action.setCheckable(True)
             action.triggered.connect(
                 lambda checked, selected=alignment: (
@@ -244,6 +249,7 @@ class MainWindow(QMainWindow):
         main_toolbar = QToolBar("Main", self)
         main_toolbar.setObjectName("mainToolbar")
         main_toolbar.setMovable(False)
+        main_toolbar.setIconSize(QSize(19, 19))
         main_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         main_toolbar.addActions([self.new_action, self.open_action, self.save_action])
         main_toolbar.addSeparator()
@@ -255,8 +261,17 @@ class MainWindow(QMainWindow):
         format_toolbar = QToolBar("Formatting", self)
         format_toolbar.setObjectName("formatToolbar")
         format_toolbar.setMovable(False)
+        format_toolbar.setIconSize(QSize(19, 19))
         format_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         format_toolbar.addActions([self.bold_action, self.italic_action])
+        bold_button = format_toolbar.widgetForAction(self.bold_action)
+        italic_button = format_toolbar.widgetForAction(self.italic_action)
+        if isinstance(bold_button, QToolButton):
+            bold_button.setObjectName("boldButton")
+            bold_button.setText("B")
+        if isinstance(italic_button, QToolButton):
+            italic_button.setObjectName("italicButton")
+            italic_button.setText("I")
         format_toolbar.addSeparator()
         format_toolbar.addActions(list(self.alignment_actions.values()))
         format_toolbar.addSeparator()
