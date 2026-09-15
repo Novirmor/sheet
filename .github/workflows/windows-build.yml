@@ -1,0 +1,57 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "tools/**"
+      - "packaging/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Taskfile.yml"
+      - "mise.toml"
+      - ".github/workflows/windows-build.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+
+      - name: Install dependencies
+        run: task setup
+
+      - name: Run checks
+        run: task check
+
+      - name: Build Windows application
+        run: task package
+
+      - name: Smoke test executable
+        shell: pwsh
+        run: |
+          & ".\dist\Sheet\Sheet.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create distribution archive
+        shell: pwsh
+        run: Compress-Archive -Path "dist\Sheet\*" -DestinationPath "dist\Sheet-windows-x64.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sheet-windows-x64
+          path: dist/Sheet-windows-x64.zip
+          if-no-files-found: error

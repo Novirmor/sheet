@@ -1,0 +1,52 @@
+version: "3"
+
+tasks:
+  setup:
+    desc: Install the project and development dependencies
+    cmds:
+      - uv sync
+
+  setup-wsl:
+    desc: Install native Qt libraries needed by WSLg
+    platforms: [linux]
+    cmds:
+      - >-
+        sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-image0
+        libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxkbcommon-x11-0
+
+  run:
+    desc: Start Sheet
+    cmds:
+      - uv run sheet {{.CLI_ARGS}}
+
+  package:
+    desc: Build a native one-folder application for the current platform
+    cmds:
+      - uv run python tools/package.py
+      - uv run python tools/clear_execstack.py dist/Sheet
+
+  format:
+    desc: Format Python sources
+    cmds:
+      - uv run ruff format .
+      - uv run ruff check --fix .
+
+  lint:
+    desc: Check formatting and lint rules
+    cmds:
+      - uv run ruff format --check .
+      - uv run ruff check .
+
+  typecheck:
+    desc: Run static type checks
+    cmds:
+      - uv run ty check
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - uv run pytest
+
+  check:
+    desc: Run every verification check
+    deps: [lint, typecheck, test]
