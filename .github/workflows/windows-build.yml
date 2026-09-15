@@ -23,9 +23,9 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: jdx/mise-action@v3
+      - uses: jdx/mise-action@v4
         with:
           install: true
           cache: true
@@ -50,7 +50,7 @@ jobs:
         run: Compress-Archive -Path "dist\Sheet\*" -DestinationPath "dist\Sheet-windows-x64.zip" -Force
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Sheet-windows-x64
           path: dist/Sheet-windows-x64.zip
