@@ -39,6 +39,47 @@ def test_formula_errors_are_displayed() -> None:
     workbook.close()
 
 
+def test_error_values_propagate_to_dependent_formulas() -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_cell(0, 0, "=1 / 0")
+    workbook.set_cell(0, 1, "=A1 + 2")
+
+    assert workbook.value(0, 1) == "#DIV/0!"
+    workbook.close()
+
+
+def test_only_dependent_formula_values_are_invalidated() -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_cells(
+        {
+            (0, 0): "1",
+            (0, 1): "=A1 * 2",
+            (0, 2): "5",
+            (0, 3): "=C1 * 2",
+        }
+    )
+    unrelated_coordinate = (0, 3)
+    cached_unrelated_value = workbook._values[unrelated_coordinate]
+
+    workbook.set_cell(0, 0, "3")
+
+    assert workbook.value(0, 1) == 6
+    assert workbook._values[unrelated_coordinate] == cached_unrelated_value
+    workbook.close()
+
+
+def test_cycles_update_when_formula_dependencies_change() -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_cell(0, 0, "=B1")
+    workbook.set_cell(0, 1, "=A1")
+    assert workbook.value(0, 0) == "#CYCLE!"
+    assert workbook.value(0, 1) == "#CYCLE!"
+
+    workbook.set_cell(0, 1, "10")
+    assert workbook.value(0, 0) == 10
+    workbook.close()
+
+
 def test_save_as_moves_workbook_to_new_database(tmp_path: Path) -> None:
     workbook = Workbook(":memory:")
     workbook.set_cell(0, 0, "saved")

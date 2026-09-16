@@ -7,7 +7,13 @@ from pathlib import Path
 
 from sheet.database import SpreadsheetStore
 from sheet.formatting import ALIGNMENTS, NUMBER_FORMATS, CellFormat
-from sheet.formulas import CellValue, FormulaError, FormulaEvaluator, coerce_value
+from sheet.formulas import (
+    CellValue,
+    FormulaError,
+    FormulaEvaluator,
+    coerce_value,
+    formula_dependencies,
+)
 
 
 class Workbook:
@@ -32,8 +38,11 @@ class Workbook:
         self.formats = self.store.load_formats()
         self.rows, self.columns = self.store.dimensions()
         self._values: dict[tuple[int, int], CellValue] = {}
+        self._dependencies: dict[tuple[int, int], set[tuple[int, int]]] = {}
+        self._dependents: dict[tuple[int, int], set[tuple[int, int]]] = {}
         self.dirty = False
         self.recovery_error: OSError | None = None
+        self._rebuild_dependencies()
         self.recalculate()
 
     @property
@@ -87,8 +96,10 @@ class Workbook:
         self.store.set_cells(
             (row, column, value) for (row, column), value in normalized_values.items()
         )
+        for coordinate in normalized_values:
+            self._update_dependencies(coordinate)
         self._mark_modified()
-        self.recalculate()
+        self.recalculate(self._affected_cells(set(normalized_values)))
 
     def cell_format(self, row: int, column: int) -> CellFormat:
         return self.formats.get((row, column), CellFormat())
@@ -231,10 +242,45 @@ class Workbook:
         if cell_format.number_format not in NUMBER_FORMATS:
             raise ValueError(f"invalid number format: {cell_format.number_format}")
 
-    def recalculate(self) -> None:
-        self._values.clear()
-        for coordinate in self.cells:
+    def recalculate(self, coordinates: set[tuple[int, int]] | None = None) -> None:
+        targets = set(self.cells) if coordinates is None else coordinates
+        for coordinate in targets:
+            self._values.pop(coordinate, None)
+        for coordinate in targets:
             self._evaluate_cell(*coordinate, visiting=set())
+
+    def _rebuild_dependencies(self) -> None:
+        self._dependencies.clear()
+        self._dependents.clear()
+        for coordinate in self.cells:
+            self._update_dependencies(coordinate)
+
+    def _update_dependencies(self, coordinate: tuple[int, int]) -> None:
+        for dependency in self._dependencies.pop(coordinate, set()):
+            dependents = self._dependents.get(dependency)
+            if dependents is not None:
+                dependents.discard(coordinate)
+                if not dependents:
+                    self._dependents.pop(dependency, None)
+
+        raw_value = self.cells.get(coordinate, "")
+        if not raw_value.startswith("="):
+            return
+        dependencies = formula_dependencies(raw_value[1:])
+        self._dependencies[coordinate] = dependencies
+        for dependency in dependencies:
+            self._dependents.setdefault(dependency, set()).add(coordinate)
+
+    def _affected_cells(self, changed: set[tuple[int, int]]) -> set[tuple[int, int]]:
+        affected = set(changed)
+        pending = list(changed)
+        while pending:
+            coordinate = pending.pop()
+            for dependent in self._dependents.get(coordinate, set()):
+                if dependent not in affected:
+                    affected.add(dependent)
+                    pending.append(dependent)
+        return affected
 
     def _evaluate_cell(self, row: int, column: int, visiting: set[tuple[int, int]]) -> CellValue:
         coordinate = (row, column)
