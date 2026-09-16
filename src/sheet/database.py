@@ -6,10 +6,10 @@ from sheet.formatting import CellFormat
 
 
 class SpreadsheetStore:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, journal_mode: str = "WAL") -> None:
         self.path = Path(path) if path != ":memory:" else None
         self._connection = sqlite3.connect(path)
-        self._connection.execute("PRAGMA journal_mode = WAL")
+        self._connection.execute(f"PRAGMA journal_mode = {journal_mode}")
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._create_schema()
 
@@ -85,33 +85,37 @@ class SpreadsheetStore:
         }
 
     def set_format(self, row: int, column: int, cell_format: CellFormat) -> None:
+        self.set_formats(((row, column, cell_format),))
+
+    def set_formats(self, formats: Iterable[tuple[int, int, CellFormat]]) -> None:
         with self._connection:
-            if cell_format.is_default:
-                self._connection.execute(
-                    "DELETE FROM cell_formats WHERE row_index = ? AND column_index = ?",
-                    (row, column),
-                )
-            else:
-                self._connection.execute(
-                    """
-                    INSERT INTO cell_formats (
-                        row_index, column_index, bold, italic, alignment, number_format
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (row_index, column_index) DO UPDATE SET
-                        bold = excluded.bold,
-                        italic = excluded.italic,
-                        alignment = excluded.alignment,
-                        number_format = excluded.number_format
-                    """,
-                    (
-                        row,
-                        column,
-                        cell_format.bold,
-                        cell_format.italic,
-                        cell_format.alignment,
-                        cell_format.number_format,
-                    ),
-                )
+            for row, column, cell_format in formats:
+                if cell_format.is_default:
+                    self._connection.execute(
+                        "DELETE FROM cell_formats WHERE row_index = ? AND column_index = ?",
+                        (row, column),
+                    )
+                else:
+                    self._connection.execute(
+                        """
+                        INSERT INTO cell_formats (
+                            row_index, column_index, bold, italic, alignment, number_format
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (row_index, column_index) DO UPDATE SET
+                            bold = excluded.bold,
+                            italic = excluded.italic,
+                            alignment = excluded.alignment,
+                            number_format = excluded.number_format
+                        """,
+                        (
+                            row,
+                            column,
+                            cell_format.bold,
+                            cell_format.italic,
+                            cell_format.alignment,
+                            cell_format.number_format,
+                        ),
+                    )
 
     def dimensions(self, default_rows: int = 100, default_columns: int = 26) -> tuple[int, int]:
         values = dict(self._connection.execute("SELECT key, value FROM metadata"))
@@ -128,6 +132,19 @@ class SpreadsheetStore:
                 """,
                 (("rows", str(rows)), ("columns", str(columns))),
             )
+
+    def set_metadata(self, values: dict[str, str]) -> None:
+        with self._connection:
+            self._connection.executemany(
+                """
+                INSERT INTO metadata (key, value) VALUES (?, ?)
+                ON CONFLICT (key) DO UPDATE SET value = excluded.value
+                """,
+                values.items(),
+            )
+
+    def metadata(self) -> dict[str, str]:
+        return dict(self._connection.execute("SELECT key, value FROM metadata"))
 
     def replace_cells(self, cells: Iterable[tuple[int, int, str]]) -> None:
         with self._connection:

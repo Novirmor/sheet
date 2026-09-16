@@ -112,8 +112,11 @@ class MainWindow(QMainWindow):
         self.position_label = QLabel("A1")
         self.position_label.setObjectName("statusPosition")
         self.summary_label = QLabel("Ready")
+        self.document_state_label = QLabel()
+        self.document_state_label.setObjectName("documentState")
         self.statusBar().addWidget(self.position_label)
         self.statusBar().addPermanentWidget(self.summary_label)
+        self.statusBar().addPermanentWidget(self.document_state_label)
         self.statusBar().setSizeGripEnabled(False)
 
     def _build_actions(self) -> None:
@@ -359,10 +362,11 @@ class MainWindow(QMainWindow):
             )
             return
         if row >= self.workbook.rows or column >= self.workbook.columns:
-            self.workbook.resize(
-                max(self.workbook.rows, row + 1), max(self.workbook.columns, column + 1)
+            self.model.resize(
+                max(self.workbook.rows, row + 1),
+                max(self.workbook.columns, column + 1),
+                "Expand sheet",
             )
-            self.model.refresh()
         index = self.model.index(row, column)
         self.table.setCurrentIndex(index)
         self.table.scrollTo(index, QTableView.ScrollHint.PositionAtCenter)
@@ -492,7 +496,11 @@ class MainWindow(QMainWindow):
     def _save(self) -> bool:
         if self.workbook.path is None:
             return self._save_as()
-        self.workbook.dirty = False
+        try:
+            self.workbook.save()
+        except (OSError, sqlite3.Error) as error:
+            QMessageBox.critical(self, "Could not save spreadsheet", str(error))
+            return False
         self._update_title()
         self.statusBar().showMessage("All changes saved", 2000)
         return True
@@ -521,12 +529,13 @@ class MainWindow(QMainWindow):
         return selected if selected.suffix else selected.with_suffix(".sheet")
 
     def _maybe_save_changes(self) -> bool:
-        if self.workbook.path is not None or not self.workbook.dirty:
+        if not self.workbook.dirty:
             return True
+        location = self.workbook.path.name if self.workbook.path else "this spreadsheet"
         answer = QMessageBox.question(
             self,
             "Save spreadsheet?",
-            "This spreadsheet has not been saved.",
+            f"Save changes to {location}?",
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel,
@@ -534,7 +543,10 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Save:
             return self._save_as()
-        return answer == QMessageBox.StandardButton.Discard
+        if answer == QMessageBox.StandardButton.Discard:
+            self.workbook.discard_changes()
+            return True
+        return False
 
     def _replace_workbook(self, workbook: Workbook) -> None:
         previous = self.workbook
@@ -545,8 +557,14 @@ class MainWindow(QMainWindow):
 
     def _update_title(self) -> None:
         name = self.workbook.path.name if self.workbook.path else "Untitled"
-        modified = " *" if self.workbook.path is None and self.workbook.dirty else ""
+        modified = " *" if self.workbook.dirty else ""
         self.setWindowTitle(f"{name}{modified} — Sheet")
+        if self.workbook.recovery_error is not None:
+            self.document_state_label.setText("Recovery unavailable")
+        elif self.workbook.dirty:
+            self.document_state_label.setText("Modified")
+        else:
+            self.document_state_label.setText("Saved")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self._maybe_save_changes():

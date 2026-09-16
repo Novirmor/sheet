@@ -1,3 +1,7 @@
+import os
+import tempfile
+import uuid
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,19 +12,53 @@ from sheet.formulas import CellValue, FormulaError, FormulaEvaluator, coerce_val
 
 class Workbook:
     def __init__(self, path: str | Path) -> None:
-        self.store = SpreadsheetStore(path)
+        self._path = Path(path) if path != ":memory:" else None
+        self._recovery_id = uuid.uuid4().hex
+        self.store = SpreadsheetStore(":memory:")
+        if self._path is not None and self._path.exists():
+            source = SpreadsheetStore(self._path)
+            try:
+                rows, columns = source.dimensions()
+                self.store.set_dimensions(rows, columns)
+                self.store.replace_cells(
+                    (row, column, value) for (row, column), value in source.load_cells().items()
+                )
+                self.store.replace_formats(
+                    (row, column, value) for (row, column), value in source.load_formats().items()
+                )
+            finally:
+                source.close()
         self.cells = self.store.load_cells()
         self.formats = self.store.load_formats()
         self.rows, self.columns = self.store.dimensions()
         self._values: dict[tuple[int, int], CellValue] = {}
         self.dirty = False
+        self.recovery_error: OSError | None = None
         self.recalculate()
 
     @property
     def path(self) -> Path | None:
-        return self.store.path
+        return self._path
+
+    @property
+    def recovery_path(self) -> Path:
+        return self.recovery_directory() / f"{self._recovery_id}.sheet"
+
+    @staticmethod
+    def recovery_directory() -> Path:
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = (
+            Path(local_app_data)
+            if local_app_data
+            else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+        )
+        return base / "Sheet" / "recovery"
 
     def close(self) -> None:
+        if self.dirty:
+            self._update_recovery_snapshot()
+        else:
+            self.discard_recovery_snapshot()
         self.store.close()
 
     def raw_value(self, row: int, column: int) -> str:
@@ -37,7 +75,7 @@ class Workbook:
             return
         maximum_row = max(row for row, _ in values)
         maximum_column = max(column for _, column in values)
-        self._grow_to_include(maximum_row, maximum_column)
+        self._grow_to_include(maximum_row, maximum_column, write_recovery=False)
         normalized_values: dict[tuple[int, int], str] = {}
         for coordinate, value in values.items():
             normalized = value.strip() if value.startswith("=") else value
@@ -49,7 +87,7 @@ class Workbook:
         self.store.set_cells(
             (row, column, value) for (row, column), value in normalized_values.items()
         )
-        self.dirty = True
+        self._mark_modified()
         self.recalculate()
 
     def cell_format(self, row: int, column: int) -> CellFormat:
@@ -65,11 +103,6 @@ class Workbook:
         alignment: str | None = None,
         number_format: str | None = None,
     ) -> None:
-        self._grow_to_include(row, column)
-        if alignment is not None and alignment not in ALIGNMENTS:
-            raise ValueError(f"invalid alignment: {alignment}")
-        if number_format is not None and number_format not in NUMBER_FORMATS:
-            raise ValueError(f"invalid number format: {number_format}")
         current = self.cell_format(row, column)
         updated = replace(
             current,
@@ -78,43 +111,125 @@ class Workbook:
             alignment=current.alignment if alignment is None else alignment,
             number_format=current.number_format if number_format is None else number_format,
         )
-        if updated.is_default:
-            self.formats.pop((row, column), None)
-        else:
-            self.formats[(row, column)] = updated
-        self.store.set_format(row, column, updated)
-        self.dirty = True
+        self.set_formats({(row, column): updated})
+
+    def set_formats(self, formats: dict[tuple[int, int], CellFormat]) -> None:
+        if not formats:
+            return
+        maximum_row = max(row for row, _ in formats)
+        maximum_column = max(column for _, column in formats)
+        self._grow_to_include(maximum_row, maximum_column, write_recovery=False)
+        for coordinate, cell_format in formats.items():
+            self._validate_format(cell_format)
+            if cell_format.is_default:
+                self.formats.pop(coordinate, None)
+            else:
+                self.formats[coordinate] = cell_format
+        self.store.set_formats((row, column, value) for (row, column), value in formats.items())
+        self._mark_modified()
 
     def resize(self, rows: int, columns: int) -> None:
+        self._resize(rows, columns, write_recovery=True)
+
+    def _resize(self, rows: int, columns: int, *, write_recovery: bool) -> None:
         if rows < 1 or columns < 1:
             raise ValueError("a workbook must contain at least one cell")
+        if (rows, columns) == (self.rows, self.columns):
+            return
         self.rows = rows
         self.columns = columns
         self.store.set_dimensions(rows, columns)
-        self.dirty = True
+        if write_recovery:
+            self._mark_modified()
+        else:
+            self.dirty = True
 
-    def _grow_to_include(self, row: int, column: int) -> None:
+    def _grow_to_include(self, row: int, column: int, *, write_recovery: bool) -> None:
         if row < 0 or column < 0:
             raise ValueError("cell coordinates cannot be negative")
         if row >= self.rows or column >= self.columns:
-            self.resize(max(self.rows, row + 1), max(self.columns, column + 1))
+            self._resize(
+                max(self.rows, row + 1),
+                max(self.columns, column + 1),
+                write_recovery=write_recovery,
+            )
+
+    def save(self) -> None:
+        if self._path is None:
+            raise ValueError("an untitled workbook needs a save path")
+        self._write_database(self._path)
+        self.dirty = False
+        self.discard_recovery_snapshot()
 
     def save_as(self, path: str | Path) -> None:
         destination = Path(path)
-        if self.path is not None and destination.resolve() == self.path.resolve():
-            self.dirty = False
-            return
-        replacement = SpreadsheetStore(path)
-        replacement.set_dimensions(self.rows, self.columns)
-        replacement.replace_cells(
-            (row, column, value) for (row, column), value in self.cells.items()
-        )
-        replacement.replace_formats(
-            (row, column, value) for (row, column), value in self.formats.items()
-        )
-        self.store.close()
-        self.store = replacement
+        self._write_database(destination)
+        self._path = destination
         self.dirty = False
+        self.discard_recovery_snapshot()
+
+    def write_recovery_snapshot(self) -> None:
+        self._write_database(self.recovery_path, recovery=True)
+
+    def discard_recovery_snapshot(self) -> None:
+        for path in (self.recovery_path, self.recovery_path.with_suffix(".sheet-wal")):
+            with suppress(FileNotFoundError):
+                path.unlink()
+
+    def discard_changes(self) -> None:
+        self.dirty = False
+        self.discard_recovery_snapshot()
+
+    def _mark_modified(self) -> None:
+        self.dirty = True
+        self._update_recovery_snapshot()
+
+    def _update_recovery_snapshot(self) -> None:
+        try:
+            self.write_recovery_snapshot()
+        except OSError as error:
+            self.recovery_error = error
+        else:
+            self.recovery_error = None
+
+    def _write_database(self, destination: Path, *, recovery: bool = False) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        try:
+            snapshot = SpreadsheetStore(temporary_path, journal_mode="DELETE")
+            try:
+                snapshot.set_dimensions(self.rows, self.columns)
+                snapshot.replace_cells(
+                    (row, column, value) for (row, column), value in self.cells.items()
+                )
+                snapshot.replace_formats(
+                    (row, column, value) for (row, column), value in self.formats.items()
+                )
+                if recovery:
+                    snapshot.set_metadata(
+                        {
+                            "recovery_source": str(self._path) if self._path else "",
+                            "recovery_id": self._recovery_id,
+                        }
+                    )
+            finally:
+                snapshot.close()
+            os.replace(temporary_path, destination)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                temporary_path.unlink()
+            raise
+
+    @staticmethod
+    def _validate_format(cell_format: CellFormat) -> None:
+        if cell_format.alignment not in ALIGNMENTS:
+            raise ValueError(f"invalid alignment: {cell_format.alignment}")
+        if cell_format.number_format not in NUMBER_FORMATS:
+            raise ValueError(f"invalid number format: {cell_format.number_format}")
 
     def recalculate(self) -> None:
         self._values.clear()

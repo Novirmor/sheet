@@ -42,6 +42,19 @@ def test_bulk_edits_and_formatting_can_be_undone(application: QApplication) -> N
     model.workbook.close()
 
 
+def test_dimension_changes_can_be_undone(application: QApplication) -> None:
+    model = SpreadsheetModel(Workbook(":memory:"))
+    initial = (model.workbook.rows, model.workbook.columns)
+    model.add_rows(10)
+    model.add_columns(5)
+
+    assert (model.workbook.rows, model.workbook.columns) == (110, 31)
+    model.undo_stack.undo()
+    model.undo_stack.undo()
+    assert (model.workbook.rows, model.workbook.columns) == initial
+    model.workbook.close()
+
+
 def test_window_copy_and_paste(application: QApplication) -> None:
     window = MainWindow(":memory:")
     window.model.set_cells({(0, 0): "alpha", (0, 1): "beta"})

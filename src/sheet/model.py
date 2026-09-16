@@ -36,24 +36,12 @@ class FormatCellsCommand(QUndoCommand):
         self,
         model: SpreadsheetModel,
         old_formats: dict[tuple[int, int], CellFormat],
-        changes: dict[str, Any],
+        new_formats: dict[tuple[int, int], CellFormat],
     ) -> None:
         super().__init__("Format cells")
         self.model = model
         self.old_formats = old_formats
-        self.new_formats: dict[tuple[int, int], CellFormat] = {}
-        for coordinate in old_formats:
-            row, column = coordinate
-            model.workbook.set_format(row, column, **changes)
-            self.new_formats[coordinate] = model.workbook.cell_format(row, column)
-            model.workbook.set_format(
-                row,
-                column,
-                bold=old_formats[coordinate].bold,
-                italic=old_formats[coordinate].italic,
-                alignment=old_formats[coordinate].alignment,
-                number_format=old_formats[coordinate].number_format,
-            )
+        self.new_formats = new_formats
 
     def redo(self) -> None:
         self._apply(self.new_formats)
@@ -62,16 +50,28 @@ class FormatCellsCommand(QUndoCommand):
         self._apply(self.old_formats)
 
     def _apply(self, formats: dict[tuple[int, int], CellFormat]) -> None:
-        for (row, column), cell_format in formats.items():
-            self.model.workbook.set_format(
-                row,
-                column,
-                bold=cell_format.bold,
-                italic=cell_format.italic,
-                alignment=cell_format.alignment,
-                number_format=cell_format.number_format,
-            )
+        self.model.workbook.set_formats(formats)
         self.model._emit_all_changed()
+
+
+class ResizeCommand(QUndoCommand):
+    def __init__(
+        self,
+        model: SpreadsheetModel,
+        previous: tuple[int, int],
+        updated: tuple[int, int],
+        text: str,
+    ) -> None:
+        super().__init__(text)
+        self.model = model
+        self.previous = previous
+        self.updated = updated
+
+    def redo(self) -> None:
+        self.model._apply_dimensions(self.updated)
+
+    def undo(self) -> None:
+        self.model._apply_dimensions(self.previous)
 
 
 class SpreadsheetModel(QAbstractTableModel):
@@ -162,18 +162,16 @@ class SpreadsheetModel(QAbstractTableModel):
         self.undo_stack.push(CellEditCommand(self, old_values, changed, text))
 
     def add_rows(self, count: int = 10) -> None:
-        first = self.workbook.rows
-        last = first + count - 1
-        self.beginInsertRows(QModelIndex(), first, last)
-        self.workbook.resize(self.workbook.rows + count, self.workbook.columns)
-        self.endInsertRows()
+        self.resize(self.workbook.rows + count, self.workbook.columns, "Add rows")
 
     def add_columns(self, count: int = 5) -> None:
-        first = self.workbook.columns
-        last = first + count - 1
-        self.beginInsertColumns(QModelIndex(), first, last)
-        self.workbook.resize(self.workbook.rows, self.workbook.columns + count)
-        self.endInsertColumns()
+        self.resize(self.workbook.rows, self.workbook.columns + count, "Add columns")
+
+    def resize(self, rows: int, columns: int, text: str = "Resize sheet") -> None:
+        previous = (self.workbook.rows, self.workbook.columns)
+        updated = (rows, columns)
+        if previous != updated:
+            self.undo_stack.push(ResizeCommand(self, previous, updated, text))
 
     def apply_format(self, indexes: list[QModelIndex], **changes: Any) -> None:
         coordinates = {(index.row(), index.column()) for index in indexes}
@@ -182,7 +180,23 @@ class SpreadsheetModel(QAbstractTableModel):
         old_formats = {
             coordinate: self.workbook.cell_format(*coordinate) for coordinate in coordinates
         }
-        self.undo_stack.push(FormatCellsCommand(self, old_formats, changes))
+        new_formats = {
+            coordinate: CellFormat(
+                bold=current.bold if "bold" not in changes else bool(changes["bold"]),
+                italic=current.italic if "italic" not in changes else bool(changes["italic"]),
+                alignment=(
+                    current.alignment if "alignment" not in changes else str(changes["alignment"])
+                ),
+                number_format=(
+                    current.number_format
+                    if "number_format" not in changes
+                    else str(changes["number_format"])
+                ),
+            )
+            for coordinate, current in old_formats.items()
+        }
+        if old_formats != new_formats:
+            self.undo_stack.push(FormatCellsCommand(self, old_formats, new_formats))
 
     def replace_workbook(self, workbook: Workbook) -> None:
         self.beginResetModel()
@@ -207,6 +221,11 @@ class SpreadsheetModel(QAbstractTableModel):
             self.endResetModel()
         else:
             self._emit_all_changed()
+
+    def _apply_dimensions(self, dimensions: tuple[int, int]) -> None:
+        self.beginResetModel()
+        self.workbook.resize(*dimensions)
+        self.endResetModel()
 
     def _emit_all_changed(self) -> None:
         if self.workbook.rows and self.workbook.columns:

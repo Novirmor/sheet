@@ -188,6 +188,9 @@ QLabel#statusPosition {
     font-weight: 600;
     color: #174ea6;
 }
+QLabel#documentState {
+    color: #667085;
+}
 QPushButton {
     background: #ffffff;
     color: #182230;
