@@ -134,6 +134,7 @@ def test_save_as_failure_leaves_existing_file_untouched(tmp_path: Path) -> None:
 
 def test_recovery_snapshot_tracks_unsaved_work(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "state"))
     workbook = Workbook(":memory:")
     workbook.set_cell(0, 0, "recover me")
 
@@ -149,6 +150,7 @@ def test_recovery_snapshot_tracks_unsaved_work(tmp_path: Path, monkeypatch) -> N
 
 def test_discarding_changes_removes_recovery_snapshot(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "state"))
     workbook = Workbook(":memory:")
     workbook.set_cell(0, 0, "discard me")
     assert workbook.recovery_path.exists()
@@ -175,6 +177,7 @@ def test_formatting_is_saved_with_workbook(tmp_path: Path) -> None:
 
 def test_scripts_are_saved_with_workbook_and_recovery(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "state"))
     workbook = Workbook(":memory:")
     workbook.set_script("main", 'sheet.set("A1", "saved")')
     workbook.set_script("report", "print('report')")
@@ -232,6 +235,7 @@ def test_deleting_referenced_row_creates_reference_error() -> None:
 
 def test_recovery_snapshots_can_be_discovered_and_restored(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "state"))
     workbook = Workbook(":memory:")
     workbook.set_cell(0, 0, "recover me")
 
