@@ -2,7 +2,12 @@ import re
 
 import pytest
 
-from sheet.formulas import FormulaError, FormulaEvaluator, formula_dependencies
+from sheet.formulas import (
+    FormulaError,
+    FormulaEvaluator,
+    formula_dependencies,
+    transform_formula_references,
+)
 
 
 def test_formula_dependencies_include_cells_and_ranges() -> None:
@@ -13,6 +18,13 @@ def test_formula_dependencies_include_cells_and_ranges() -> None:
         (1, 1),
         (2, 2),
     }
+
+
+def test_formula_reference_transform_leaves_string_literals_unchanged() -> None:
+    assert (
+        transform_formula_references('A1 + B2 + "A1"', lambda row, column: (row + 1, column))
+        == 'A2 + B3 + "A1"'
+    )
 
 
 def test_safe_python_expressions_support_comparisons_and_conditionals() -> None:

@@ -173,6 +173,28 @@ def test_formatting_is_saved_with_workbook(tmp_path: Path) -> None:
     reopened.close()
 
 
+def test_scripts_are_saved_with_workbook_and_recovery(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    workbook = Workbook(":memory:")
+    workbook.set_script("main", 'sheet.set("A1", "saved")')
+    workbook.set_script("report", "print('report')")
+    destination = tmp_path / "scripted.sheet"
+    workbook.save_as(destination)
+
+    reopened = Workbook(destination)
+    assert reopened.scripts == {
+        "main": 'sheet.set("A1", "saved")',
+        "report": "print('report')",
+    }
+    reopened.close()
+
+    workbook.delete_script("report")
+    recovered = Workbook(workbook.recovery_path)
+    assert recovered.scripts == {"main": 'sheet.set("A1", "saved")'}
+    recovered.close()
+    workbook.close()
+
+
 def test_setting_a_cell_can_grow_the_workbook() -> None:
     workbook = Workbook(":memory:")
     workbook.set_cell(150, 30, "outside the initial grid")
@@ -180,4 +202,58 @@ def test_setting_a_cell_can_grow_the_workbook() -> None:
     assert workbook.rows == 151
     assert workbook.columns == 31
     assert workbook.value(150, 30) == "outside the initial grid"
+    workbook.close()
+
+
+def test_inserting_rows_moves_cells_formats_and_formula_references() -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_cells({(0, 0): "10", (0, 1): "=A1 * 2"})
+    workbook.set_format(0, 0, bold=True)
+
+    workbook.apply_grid_state(workbook.grid_after_insert_rows(0))
+
+    assert workbook.raw_value(1, 0) == "10"
+    assert workbook.raw_value(1, 1) == "=A2 * 2"
+    assert workbook.value(1, 1) == 20
+    assert workbook.cell_format(1, 0).bold is True
+    workbook.close()
+
+
+def test_deleting_referenced_row_creates_reference_error() -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_cells({(0, 0): "10", (1, 1): "=A1 * 2"})
+
+    workbook.apply_grid_state(workbook.grid_after_delete_rows(0))
+
+    assert workbook.raw_value(0, 1) == "=#REF!"
+    assert workbook.value(0, 1) == "#REF!"
+    workbook.close()
+
+
+def test_recovery_snapshots_can_be_discovered_and_restored(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    workbook = Workbook(":memory:")
+    workbook.set_cell(0, 0, "recover me")
+
+    [snapshot] = Workbook.recovery_snapshots()
+    restored = Workbook.from_recovery(snapshot)
+
+    assert restored.raw_value(0, 0) == "recover me"
+    assert restored.dirty is True
+    restored.save_as(tmp_path / "restored.sheet")
+    assert not snapshot.path.exists()
+    restored.close()
+    workbook.dirty = False
+    workbook.close()
+
+
+def test_sorting_rows_moves_formats_and_keeps_empty_values_last() -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_cells({(0, 0): "bravo", (0, 1): "2", (1, 0): "alpha", (1, 1): "1"})
+    workbook.set_format(0, 0, bold=True)
+
+    workbook.apply_grid_state(workbook.grid_after_sort_rows(0, 2, 0, 1, 0, descending=False))
+
+    assert [workbook.raw_value(row, 0) for row in range(3)] == ["alpha", "bravo", ""]
+    assert workbook.cell_format(1, 0).bold is True
     workbook.close()

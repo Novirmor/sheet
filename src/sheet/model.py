@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor, QFont, QUndoCommand, QUndoStack
 
 from sheet.coordinates import column_name
 from sheet.formatting import CellFormat, display_value
-from sheet.workbook import Workbook
+from sheet.workbook import GridState, Workbook
 
 INVALID_INDEX = QModelIndex()
 type ModelIndex = QModelIndex | QPersistentModelIndex
@@ -72,6 +72,22 @@ class ResizeCommand(QUndoCommand):
 
     def undo(self) -> None:
         self.model._apply_dimensions(self.previous)
+
+
+class GridStateCommand(QUndoCommand):
+    def __init__(
+        self, model: SpreadsheetModel, previous: GridState, updated: GridState, text: str
+    ) -> None:
+        super().__init__(text)
+        self.model = model
+        self.previous = previous
+        self.updated = updated
+
+    def redo(self) -> None:
+        self.model._apply_grid_state(self.updated)
+
+    def undo(self) -> None:
+        self.model._apply_grid_state(self.previous)
 
 
 class SpreadsheetModel(QAbstractTableModel):
@@ -161,11 +177,50 @@ class SpreadsheetModel(QAbstractTableModel):
         old_values = {coordinate: self.workbook.raw_value(*coordinate) for coordinate in changed}
         self.undo_stack.push(CellEditCommand(self, old_values, changed, text))
 
+    def apply_script_changes(
+        self, values: dict[tuple[int, int], str], rows: int, columns: int
+    ) -> None:
+        self.undo_stack.beginMacro("Run Python script")
+        self.resize(rows, columns, "Resize sheet")
+        self.set_cells(values, "Apply script changes")
+        self.undo_stack.endMacro()
+
     def add_rows(self, count: int = 10) -> None:
         self.resize(self.workbook.rows + count, self.workbook.columns, "Add rows")
 
     def add_columns(self, count: int = 5) -> None:
         self.resize(self.workbook.rows, self.workbook.columns + count, "Add columns")
+
+    def insert_rows(self, index: int, count: int = 1) -> None:
+        self._apply_structure_change(
+            self.workbook.grid_after_insert_rows(index, count), "Insert rows"
+        )
+
+    def delete_rows(self, index: int, count: int = 1) -> None:
+        self._apply_structure_change(
+            self.workbook.grid_after_delete_rows(index, count), "Delete rows"
+        )
+
+    def insert_columns(self, index: int, count: int = 1) -> None:
+        self._apply_structure_change(
+            self.workbook.grid_after_insert_columns(index, count), "Insert columns"
+        )
+
+    def delete_columns(self, index: int, count: int = 1) -> None:
+        self._apply_structure_change(
+            self.workbook.grid_after_delete_columns(index, count), "Delete columns"
+        )
+
+    def sort_rows(
+        self, top: int, bottom: int, left: int, right: int, sort_column: int, descending: bool
+    ) -> None:
+        self._apply_structure_change(
+            self.workbook.grid_after_sort_rows(top, bottom, left, right, sort_column, descending),
+            "Sort rows",
+        )
+
+    def _apply_structure_change(self, updated: GridState, text: str) -> None:
+        self.undo_stack.push(GridStateCommand(self, self.workbook.grid_state(), updated, text))
 
     def resize(self, rows: int, columns: int, text: str = "Resize sheet") -> None:
         previous = (self.workbook.rows, self.workbook.columns)
@@ -225,6 +280,11 @@ class SpreadsheetModel(QAbstractTableModel):
     def _apply_dimensions(self, dimensions: tuple[int, int]) -> None:
         self.beginResetModel()
         self.workbook.resize(*dimensions)
+        self.endResetModel()
+
+    def _apply_grid_state(self, state: GridState) -> None:
+        self.beginResetModel()
+        self.workbook.apply_grid_state(state)
         self.endResetModel()
 
     def _emit_all_changed(self) -> None:

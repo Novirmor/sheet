@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import pytest
 from PySide6.QtCore import QItemSelectionModel
 from PySide6.QtWidgets import QApplication
 
 from sheet.model import SpreadsheetModel
+from sheet.script_dialog import ScriptWorkspace
 from sheet.window import MainWindow
 from sheet.workbook import Workbook
 
@@ -55,6 +58,72 @@ def test_dimension_changes_can_be_undone(application: QApplication) -> None:
     model.workbook.close()
 
 
+def test_inserted_rows_can_be_undone(application: QApplication) -> None:
+    model = SpreadsheetModel(Workbook(":memory:"))
+    model.set_cells({(0, 0): "value"})
+    model.insert_rows(0)
+
+    assert model.workbook.raw_value(1, 0) == "value"
+    model.undo_stack.undo()
+    assert model.workbook.raw_value(0, 0) == "value"
+    model.workbook.close()
+
+
+def test_sorted_rows_can_be_undone(application: QApplication) -> None:
+    model = SpreadsheetModel(Workbook(":memory:"))
+    model.set_cells({(0, 0): "bravo", (1, 0): "alpha"})
+    model.sort_rows(0, 1, 0, 0, 0, descending=False)
+
+    assert [model.workbook.raw_value(row, 0) for row in range(2)] == ["alpha", "bravo"]
+    model.undo_stack.undo()
+    assert [model.workbook.raw_value(row, 0) for row in range(2)] == ["bravo", "alpha"]
+    model.workbook.close()
+
+
+def test_script_changes_are_one_undoable_action(application: QApplication) -> None:
+    model = SpreadsheetModel(Workbook(":memory:"))
+    model.apply_script_changes({(101, 26): "42"}, 102, 27)
+
+    assert model.undo_stack.count() == 1
+    assert model.workbook.raw_value(101, 26) == "42"
+    model.undo_stack.undo()
+    assert (model.workbook.rows, model.workbook.columns) == (100, 26)
+    assert model.workbook.raw_value(101, 26) == ""
+    model.workbook.close()
+
+
+def test_script_workspace_switches_and_saves_named_scripts(
+    application: QApplication, tmp_path: Path
+) -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_script("main", "print('main')")
+    workbook.set_script("report", "print('report')")
+    workspace = ScriptWorkspace(SpreadsheetModel(workbook))
+
+    assert workspace.active_name == "main"
+    workspace.script_list.setCurrentRow(1)
+    assert workspace.active_name == "report"
+    workspace.editor.setPlainText("print('updated')")
+    workspace.sync_active_script()
+    assert workbook.scripts["report"] == "print('updated')"
+    external_path = tmp_path / "report.py"
+    workspace.external_paths["report"] = external_path
+    workspace._save_external_script()
+    assert external_path.read_text() == "print('updated')"
+    workspace.deleteLater()
+    workbook.close()
+
+
+def test_script_workspace_reports_syntax_errors_before_starting(application: QApplication) -> None:
+    workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
+    workspace.editor.setPlainText("def broken(:\n    pass")
+    workspace.run_script()
+
+    assert workspace.runner is None
+    assert workspace.output.toPlainText().startswith("Syntax error at line 1, column 12")
+    workspace.model.workbook.close()
+
+
 def test_window_copy_and_paste(application: QApplication) -> None:
     window = MainWindow(":memory:")
     window.model.set_cells({(0, 0): "alpha", (0, 1): "beta"})
@@ -69,4 +138,47 @@ def test_window_copy_and_paste(application: QApplication) -> None:
     assert window.workbook.raw_value(1, 1) == "beta"
 
     window.workbook.dirty = False
+    window.close()
+
+
+def test_csv_export_uses_used_cells_or_multicell_selection(application: QApplication) -> None:
+    window = MainWindow(":memory:")
+    window.model.set_cells({(0, 0): "name", (1, 1): "=A1"})
+
+    assert window._csv_rows() == [["name", ""], ["", "=A1"]]
+
+    selection = window.table.selectionModel()
+    selection.select(window.model.index(0, 0), QItemSelectionModel.SelectionFlag.ClearAndSelect)
+    selection.select(window.model.index(0, 1), QItemSelectionModel.SelectionFlag.Select)
+    assert window._csv_rows() == [["name", ""]]
+
+    window.workbook.dirty = False
+    window.close()
+
+
+def test_find_and_replace_navigates_cells_and_uses_one_undo(application: QApplication) -> None:
+    window = MainWindow(":memory:")
+    window.model.set_cells({(0, 0): "Coffee", (0, 1): "coffee shop", (1, 0): "Tea"})
+    window.table.setCurrentIndex(window.model.index(0, 0))
+
+    assert window._find_next("coffee", match_case=False) is True
+    assert window.table.currentIndex() == window.model.index(0, 1)
+    assert window._replace_all("coffee", "tea", match_case=False) == 2
+    assert window.workbook.raw_value(0, 0) == "tea"
+    assert window.workbook.raw_value(0, 1) == "tea shop"
+
+    window.model.undo_stack.undo()
+    assert window.workbook.raw_value(0, 0) == "Coffee"
+    assert window.workbook.raw_value(0, 1) == "coffee shop"
+    window.workbook.dirty = False
+    window.close()
+
+
+def test_header_selection_selects_complete_rows_and_columns(application: QApplication) -> None:
+    window = MainWindow(":memory:")
+    window._select_row(2)
+    assert len(window.table.selectionModel().selectedIndexes()) == window.workbook.columns
+
+    window._select_column(3)
+    assert len(window.table.selectionModel().selectedIndexes()) == window.workbook.rows
     window.close()

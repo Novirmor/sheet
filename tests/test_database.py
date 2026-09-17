@@ -33,3 +33,11 @@ def test_cell_format_is_persistent() -> None:
 
     assert store.load_formats() == {(2, 3): expected}
     store.close()
+
+
+def test_scripts_are_persistent() -> None:
+    store = SpreadsheetStore(":memory:")
+    store.replace_scripts((("main", "print('main')"), ("report", "print('report')")))
+
+    assert store.load_scripts() == {"main": "print('main')", "report": "print('report')"}
+    store.close()

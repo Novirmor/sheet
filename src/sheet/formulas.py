@@ -2,10 +2,12 @@ import ast
 import math
 import operator
 import re
+import tokenize
 from collections.abc import Callable, Iterable
+from io import StringIO
 from typing import ClassVar
 
-from sheet.coordinates import CELL_REFERENCE, cells_in_range, parse_cell_reference
+from sheet.coordinates import CELL_REFERENCE, cell_reference, cells_in_range, parse_cell_reference
 
 type CellValue = str | int | float | bool | None
 type FormulaValue = CellValue | list[CellValue]
@@ -94,6 +96,22 @@ def formula_dependencies(formula: str) -> set[tuple[int, int]]:
     visitor = _DependencyVisitor()
     visitor.visit(tree.body)
     return visitor.coordinates
+
+
+def transform_formula_references(
+    formula: str, transform: Callable[[int, int], tuple[int, int] | None]
+) -> str | None:
+    tokens = list(tokenize.generate_tokens(StringIO(formula).readline))
+    transformed_tokens: list[tokenize.TokenInfo] = []
+    for token in tokens:
+        if token.type == tokenize.NAME and CELL_REFERENCE.fullmatch(token.string.upper()):
+            row, column = parse_cell_reference(token.string)
+            transformed = transform(row, column)
+            if transformed is None:
+                return None
+            token = token._replace(string=cell_reference(*transformed))
+        transformed_tokens.append(token)
+    return tokenize.untokenize(transformed_tokens)
 
 
 class FormulaEvaluator:

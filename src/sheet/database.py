@@ -38,6 +38,11 @@ class SpreadsheetStore:
                     number_format TEXT NOT NULL DEFAULT 'general',
                     PRIMARY KEY (row_index, column_index)
                 );
+
+                CREATE TABLE IF NOT EXISTS scripts (
+                    name TEXT PRIMARY KEY,
+                    source TEXT NOT NULL
+                );
                 """
             )
 
@@ -145,6 +150,17 @@ class SpreadsheetStore:
 
     def metadata(self) -> dict[str, str]:
         return dict(self._connection.execute("SELECT key, value FROM metadata"))
+
+    def load_scripts(self) -> dict[str, str]:
+        rows = self._connection.execute("SELECT name, source FROM scripts ORDER BY name").fetchall()
+        return dict(rows)
+
+    def replace_scripts(self, scripts: Iterable[tuple[str, str]]) -> None:
+        with self._connection:
+            self._connection.execute("DELETE FROM scripts")
+            self._connection.executemany(
+                "INSERT INTO scripts (name, source) VALUES (?, ?)", scripts
+            )
 
     def replace_cells(self, cells: Iterable[tuple[int, int, str]]) -> None:
         with self._connection:
