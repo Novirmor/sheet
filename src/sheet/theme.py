@@ -120,6 +120,13 @@ QLabel#fxLabel {
     font-style: italic;
     font-weight: 600;
 }
+QToolButton#fxButton {
+    color: #667085;
+    font-style: italic;
+    font-weight: 600;
+    min-width: 28px;
+    padding: 2px;
+}
 QComboBox {
     background: #ffffff;
     color: #182230;
@@ -160,6 +167,14 @@ QTableView#spreadsheet::item {
 }
 QTableView#spreadsheet::item:selected {
     border: 1px solid #2f6feb;
+}
+QTableView#spreadsheet QLineEdit {
+    background: #ffffff;
+    color: #182230;
+    border: 1px solid #2f6feb;
+    border-radius: 0;
+    margin: 0;
+    padding: 0 6px;
 }
 QHeaderView::section {
     background: #f5f7fa;

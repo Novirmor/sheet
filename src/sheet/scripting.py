@@ -63,6 +63,27 @@ class SheetAPI:
         }
         self._workbook.set_cells(updates)
 
+    def dataframe(self, reference_range: str, *, headers: bool = True):
+        import pandas as pd
+
+        values = self.range(reference_range)
+        if not values:
+            return pd.DataFrame()
+        if headers:
+            return pd.DataFrame(values[1:], columns=values[0])
+        return pd.DataFrame(values)
+
+    def write_dataframe(
+        self, start: str, dataframe, *, include_header: bool = True, include_index: bool = False
+    ) -> None:
+        rows = dataframe.to_numpy().tolist()
+        if include_header:
+            rows.insert(0, list(dataframe.columns))
+        if include_index:
+            index = ["index", *dataframe.index.astype(str).tolist()]
+            rows = [[index[row], *values] for row, values in enumerate(rows)]
+        self.write(start, rows)
+
     @staticmethod
     def _range_coordinates(reference_range: str):
         start, separator, end = reference_range.upper().partition(":")
@@ -91,10 +112,15 @@ def _script_worker(
     workbook.set_cells(cells)
     original_cells = dict(workbook.cells)
     stream = StringIO()
+    import pandas as pd
+    import plotly.express as px
+
     namespace = {
         "__builtins__": builtins.__dict__,
         "__name__": "__sheet_script__",
         "sheet": SheetAPI(workbook),
+        "pd": pd,
+        "px": px,
     }
     filename = "<sheet-script>"
     if script_path is not None:

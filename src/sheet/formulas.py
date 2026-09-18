@@ -2,26 +2,48 @@ import ast
 import math
 import operator
 import re
-import tokenize
 from collections.abc import Callable, Iterable
-from io import StringIO
 from typing import ClassVar
 
-from sheet.coordinates import CELL_REFERENCE, cell_reference, cells_in_range, parse_cell_reference
+from sheet.coordinates import CELL_REFERENCE, cells_in_range, parse_cell_reference
+from sheet.formula_references import (
+    FormulaError,
+    formula_dependencies,
+    parse_formula,
+    transform_formula_references,
+)
+
+__all__ = [
+    "FormulaError",
+    "FormulaEvaluator",
+    "coerce_value",
+    "format_value",
+    "formula_dependencies",
+    "transform_formula_references",
+]
 
 type CellValue = str | int | float | bool | None
 type FormulaValue = CellValue | list[CellValue]
 type CellResolver = Callable[[int, int], CellValue]
 
-RANGE_REFERENCE = re.compile(r"\b([A-Za-z]+[1-9][0-9]*):([A-Za-z]+[1-9][0-9]*)\b")
 REFERENCE_LIKE_NAME = re.compile(r"^[A-Za-z]+[0-9]+$")
-SUPPORTED_FUNCTIONS = {"SUM", "AVERAGE", "AVG", "MIN", "MAX", "ABS", "ROUND", "RANGE"}
-
-
-class FormulaError(Exception):
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
+SUPPORTED_FUNCTIONS = {
+    "SUM",
+    "AVERAGE",
+    "AVG",
+    "MIN",
+    "MAX",
+    "MEDIAN",
+    "COUNT",
+    "COUNTA",
+    "ABS",
+    "ROUND",
+    "CONCAT",
+    "LEN",
+    "LOWER",
+    "UPPER",
+    "RANGE",
+}
 
 
 def coerce_value(value: str) -> CellValue:
@@ -52,68 +74,6 @@ def format_value(value: CellValue) -> str:
     return str(value)
 
 
-def _parse(formula: str) -> ast.Expression:
-    expression = RANGE_REFERENCE.sub(
-        lambda match: f'RANGE("{match.group(1).upper()}:{match.group(2).upper()}")',
-        formula,
-    )
-    try:
-        return ast.parse(expression, mode="eval")
-    except SyntaxError as error:
-        raise FormulaError("#ERROR!") from error
-
-
-class _DependencyVisitor(ast.NodeVisitor):
-    def __init__(self) -> None:
-        self.coordinates: set[tuple[int, int]] = set()
-
-    def visit_Name(self, node: ast.Name) -> None:
-        if CELL_REFERENCE.fullmatch(node.id.upper()):
-            self.coordinates.add(parse_cell_reference(node.id))
-
-    def visit_Call(self, node: ast.Call) -> None:
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id.upper() == "RANGE"
-            and len(node.args) == 1
-            and isinstance(node.args[0], ast.Constant)
-        ):
-            reference_range = node.args[0].value
-            if isinstance(reference_range, str):
-                start, separator, end = reference_range.partition(":")
-                if separator:
-                    self.coordinates.update(cells_in_range(start, end))
-                    return
-        for argument in node.args:
-            self.visit(argument)
-
-
-def formula_dependencies(formula: str) -> set[tuple[int, int]]:
-    try:
-        tree = _parse(formula)
-    except FormulaError:
-        return set()
-    visitor = _DependencyVisitor()
-    visitor.visit(tree.body)
-    return visitor.coordinates
-
-
-def transform_formula_references(
-    formula: str, transform: Callable[[int, int], tuple[int, int] | None]
-) -> str | None:
-    tokens = list(tokenize.generate_tokens(StringIO(formula).readline))
-    transformed_tokens: list[tokenize.TokenInfo] = []
-    for token in tokens:
-        if token.type == tokenize.NAME and CELL_REFERENCE.fullmatch(token.string.upper()):
-            row, column = parse_cell_reference(token.string)
-            transformed = transform(row, column)
-            if transformed is None:
-                return None
-            token = token._replace(string=cell_reference(*transformed))
-        transformed_tokens.append(token)
-    return tokenize.untokenize(transformed_tokens)
-
-
 class FormulaEvaluator:
     _binary_operators: ClassVar[dict[type[ast.operator], Callable[[float, float], float]]] = {
         ast.Add: operator.add,
@@ -142,7 +102,7 @@ class FormulaEvaluator:
 
     def evaluate(self, formula: str) -> CellValue:
         try:
-            result = self._evaluate_node(_parse(formula).body)
+            result = self._evaluate_node(parse_formula(formula).body)
         except FormulaError:
             raise
         except ZeroDivisionError as error:
@@ -177,6 +137,13 @@ class FormulaEvaluator:
             branch = node.body if self._truthy(self._evaluate_node(node.test)) else node.orelse
             return self._evaluate_node(branch)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
+            if node.func.id.upper() == "IF" and len(node.args) == 3:
+                branch = (
+                    node.args[1]
+                    if self._truthy(self._evaluate_node(node.args[0]))
+                    else node.args[2]
+                )
+                return self._evaluate_node(branch)
             arguments = [self._evaluate_node(argument) for argument in node.args]
             return self._call(node.func.id.upper(), arguments)
         raise FormulaError("#ERROR!")
@@ -220,16 +187,26 @@ class FormulaEvaluator:
 
     def _call(self, name: str, arguments: list[FormulaValue]) -> FormulaValue:
         if name == "RANGE":
-            if len(arguments) != 1 or not isinstance(arguments[0], str):
-                raise FormulaError("#REF!")
-            start, separator, end = arguments[0].partition(":")
-            if not separator:
-                raise FormulaError("#REF!")
-            return [self._resolve_cell(row, column) for row, column in cells_in_range(start, end)]
+            return self._range(arguments)
         if name not in SUPPORTED_FUNCTIONS:
             raise FormulaError("#NAME?")
+        flattened = list(self._flatten(arguments))
+        if name in {"SUM", "AVG", "AVERAGE", "MIN", "MAX", "MEDIAN", "COUNT", "ABS", "ROUND"}:
+            return self._numeric_function(name, flattened)
+        if name == "COUNTA":
+            return sum(value is not None for value in flattened)
+        return self._text_function(name, flattened)
 
-        values = list(self._numbers(self._flatten(arguments)))
+    def _range(self, arguments: list[FormulaValue]) -> list[CellValue]:
+        if len(arguments) != 1 or not isinstance(arguments[0], str):
+            raise FormulaError("#REF!")
+        start, separator, end = arguments[0].partition(":")
+        if not separator:
+            raise FormulaError("#REF!")
+        return [self._resolve_cell(row, column) for row, column in cells_in_range(start, end)]
+
+    def _numeric_function(self, name: str, flattened: list[CellValue]) -> int | float:
+        values = list(self._numbers(flattened))
         if name == "SUM":
             return sum(values)
         if name in {"AVG", "AVERAGE"}:
@@ -244,11 +221,35 @@ class FormulaEvaluator:
             if not values:
                 raise FormulaError("#TYPE!")
             return max(values)
+        if name == "MEDIAN":
+            if not values:
+                raise FormulaError("#TYPE!")
+            ordered = sorted(values)
+            middle = len(ordered) // 2
+            return (
+                ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+            )
+        if name == "COUNT":
+            return len(values)
+        if name == "COUNTA":
+            return sum(value is not None for value in flattened)
         if name == "ABS" and len(values) == 1:
             return abs(values[0])
         if name == "ROUND" and 1 <= len(values) <= 2:
             digits = int(values[1]) if len(values) == 2 else 0
             return round(values[0], digits)
+        raise FormulaError("#TYPE!")
+
+    @staticmethod
+    def _text_function(name: str, flattened: list[CellValue]) -> int | str:
+        if name == "CONCAT":
+            return "".join(format_value(value) for value in flattened)
+        if name == "LEN" and len(flattened) == 1:
+            return len(format_value(flattened[0]))
+        if name == "LOWER" and len(flattened) == 1:
+            return format_value(flattened[0]).lower()
+        if name == "UPPER" and len(flattened) == 1:
+            return format_value(flattened[0]).upper()
         raise FormulaError("#TYPE!")
 
     @staticmethod

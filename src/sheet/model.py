@@ -5,7 +5,8 @@ from PySide6.QtGui import QColor, QFont, QUndoCommand, QUndoStack
 
 from sheet.coordinates import column_name
 from sheet.formatting import CellFormat, display_value
-from sheet.workbook import GridState, Workbook
+from sheet.grid_state import GridState
+from sheet.workbook import Workbook
 
 INVALID_INDEX = QModelIndex()
 type ModelIndex = QModelIndex | QPersistentModelIndex

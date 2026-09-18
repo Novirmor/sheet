@@ -44,6 +44,12 @@ def main() -> int:
         "Sheet",
         "--paths",
         "src",
+        "--hidden-import",
+        "pandas",
+        "--hidden-import",
+        "plotly.express",
+        "--collect-data",
+        "plotly",
     ]
     if sys.platform == "win32":
         icon = Path("build/package/sheet.ico")

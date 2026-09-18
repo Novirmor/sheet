@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 
+from sheet.script_documents import available_name
 from sheet.scripting import ScriptProcess, SheetAPI
 from sheet.workbook import Workbook
 
@@ -67,3 +68,29 @@ def test_external_script_can_import_from_its_own_directory(tmp_path: Path) -> No
     assert result.failed is False
     assert result.changes == {(0, 0): "12"}
     workbook.close()
+
+
+def test_script_process_exposes_pandas_and_plotly_helpers() -> None:
+    workbook = Workbook(":memory:")
+    source = """frame = pd.DataFrame([[\"Coffee\", 4.5]], columns=[\"Item\", \"Amount\"])
+sheet.write_dataframe(\"A1\", frame)
+print(px.bar(frame, x=\"Item\", y=\"Amount\").__class__.__name__)
+"""
+    runner = ScriptProcess(source, workbook)
+    runner.start()
+
+    result = None
+    deadline = time.monotonic() + 15
+    while result is None and time.monotonic() < deadline:
+        result = runner.poll()
+        time.sleep(0.05)
+
+    assert result is not None
+    assert result.failed is False
+    assert result.changes == {(0, 0): "Item", (0, 1): "Amount", (1, 0): "Coffee", (1, 1): "4.5"}
+    assert result.output == "Figure\n"
+    workbook.close()
+
+
+def test_script_names_receive_a_simple_numeric_suffix() -> None:
+    assert available_name("report", {"report", "report 2"}) == "report 3"

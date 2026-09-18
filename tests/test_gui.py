@@ -1,12 +1,16 @@
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QItemSelectionModel
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, QRect
+from PySide6.QtWidgets import QApplication, QDockWidget, QLineEdit, QStyleOptionViewItem, QToolBar
 
+from sheet.code_editor import CodeEditor, LineNumberArea, PythonHighlighter
+from sheet.csv_io import CsvData
 from sheet.model import SpreadsheetModel
 from sheet.script_dialog import ScriptWorkspace
-from sheet.window import MainWindow
+from sheet.script_library import ScriptLibraryPanel
+from sheet.script_source import ScriptSourcePanel
+from sheet.window import NATIVE_FILE_FILTER, CellEditorDelegate, MainWindow
 from sheet.workbook import Workbook
 
 
@@ -29,6 +33,71 @@ def test_cell_edits_can_be_undone(application: QApplication) -> None:
     model.undo_stack.redo()
     assert model.workbook.value(0, 0) == 42
     model.workbook.close()
+
+
+def test_open_dialog_only_advertises_native_documents() -> None:
+    assert NATIVE_FILE_FILTER == "Sheet document (*.sheet)"
+    assert ".xlsx" not in NATIVE_FILE_FILTER
+    assert ".xls" not in NATIVE_FILE_FILTER
+    assert ".csv" not in NATIVE_FILE_FILTER
+
+
+def test_cell_editor_uses_the_full_item_rectangle(application: QApplication) -> None:
+    delegate = CellEditorDelegate()
+    editor = QLineEdit()
+    option = QStyleOptionViewItem()
+    option.rect = QRect(10, 20, 112, 27)
+    model = SpreadsheetModel(Workbook(":memory:"))
+
+    delegate.updateEditorGeometry(editor, option, model.index(0, 0))
+
+    assert editor.geometry() == option.rect
+    model.workbook.close()
+
+
+def test_code_editor_keeps_line_numbers_and_highlighting(application: QApplication) -> None:
+    editor = CodeEditor("print('hello')")
+    highlighter = PythonHighlighter(editor)
+
+    assert isinstance(editor.line_number_area, LineNumberArea)
+    assert editor.line_number_width() > 0
+    assert highlighter.document() is editor.document()
+
+
+def test_fx_menu_and_mouse_selection_insert_formula_ranges(application: QApplication) -> None:
+    window = MainWindow(":memory:")
+
+    assert [action.text() for action in window.fx_button.menu().actions()] == [
+        "Math",
+        "Text",
+        "Logic",
+    ]
+    window._insert_function("SUM")
+    selection = window.table.selectionModel()
+    selection.select(window.model.index(0, 0), QItemSelectionModel.SelectionFlag.ClearAndSelect)
+    selection.select(window.model.index(1, 1), QItemSelectionModel.SelectionFlag.Select)
+    window._selection_changed(QItemSelection(), QItemSelection())
+
+    assert window.formula_bar.text() == "=SUM(A1:B2)"
+    window.close()
+
+
+def test_window_builds_expected_menus_and_toolbars(application: QApplication) -> None:
+    window = MainWindow(":memory:")
+
+    assert [action.text() for action in window.menuBar().actions()] == [
+        "&File",
+        "&Edit",
+        "F&ormat",
+        "&Sheet",
+        "&Python",
+        "&View",
+    ]
+    assert {toolbar.objectName() for toolbar in window.findChildren(QToolBar)} == {
+        "mainToolbar",
+        "formatToolbar",
+    }
+    window.close()
 
 
 def test_bulk_edits_and_formatting_can_be_undone(application: QApplication) -> None:
@@ -114,6 +183,15 @@ def test_script_workspace_switches_and_saves_named_scripts(
     workbook.close()
 
 
+def test_script_workspace_cannot_float_or_close(application: QApplication) -> None:
+    workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
+
+    assert workspace.features() == QDockWidget.DockWidgetFeature.DockWidgetMovable
+    assert isinstance(workspace.library, ScriptLibraryPanel)
+    assert isinstance(workspace.source_panel, ScriptSourcePanel)
+    workspace.model.workbook.close()
+
+
 def test_script_workspace_reports_syntax_errors_before_starting(application: QApplication) -> None:
     workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
     workspace.editor.setPlainText("def broken(:\n    pass")
@@ -152,6 +230,18 @@ def test_csv_export_uses_used_cells_or_multicell_selection(application: QApplica
     selection.select(window.model.index(0, 1), QItemSelectionModel.SelectionFlag.Select)
     assert window._csv_rows() == [["name", ""]]
 
+    window.workbook.dirty = False
+    window.close()
+
+
+def test_csv_can_export_calculated_values_and_detect_import_conflicts(
+    application: QApplication,
+) -> None:
+    window = MainWindow(":memory:")
+    window.model.set_cells({(0, 0): "2", (0, 1): "=A1 * 3"})
+
+    assert window._csv_rows(display_values=True) == [["2", "6"]]
+    assert window._csv_conflicts(CsvData([["new", "values"]], ",", "utf-8"), 0, 0) == 2
     window.workbook.dirty = False
     window.close()
 

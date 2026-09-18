@@ -37,6 +37,20 @@ def test_safe_python_expressions_support_comparisons_and_conditionals() -> None:
     assert evaluator.evaluate("A1 > 0 and B1 > 0") is True
 
 
+def test_common_math_text_and_logic_functions() -> None:
+    values = {(0, 0): 2, (1, 0): 4, (0, 1): "Hello"}
+    evaluator = FormulaEvaluator(lambda row, column: values.get((row, column)))
+
+    assert evaluator.evaluate("COUNT(A1:A2)") == 2
+    assert evaluator.evaluate("COUNTA(A1:B2)") == 3
+    assert evaluator.evaluate("MEDIAN(A1:A2)") == 3
+    assert evaluator.evaluate('CONCAT(B1, " world")') == "Hello world"
+    assert evaluator.evaluate("LOWER(B1)") == "hello"
+    assert evaluator.evaluate("UPPER(B1)") == "HELLO"
+    assert evaluator.evaluate("LEN(B1)") == 5
+    assert evaluator.evaluate("IF(A1 > 0, A1, 1 / 0)") == 2
+
+
 @pytest.mark.parametrize(
     ("formula", "code"),
     [
