@@ -1,8 +1,8 @@
 # Python workspace implementation tasks
 
-Status: implemented locally. `--smoke-test` covers packaged process, session,
-environment-probe, and external-execution workflows on Linux; platform-specific Windows
-validation remains a release gate.
+Status: implemented and validated on Windows and Linux, including packaged external
+environment launches. Remaining work is the unimplemented debugger proposal
+([08](08-debugger-integration.md)).
 Task IDs are stable for future issues and commits.
 
 ## Foundation — reliability before new UI
@@ -72,11 +72,11 @@ Task IDs are stable for future issues and commits.
 - [x] ENV-04 Add package inspection and explicit dependency install/update previews.
 - [x] ENV-05 Add optional `uv` environment creation and portable declaration workflow.
 - [x] ENV-06 Test incompatible interpreters, spaced paths, failed installs, and offline fallback.
-- [ ] ENV-07 Smoke-test external environments from packaged Windows and Linux applications.
-  Linux packaged build verified locally via `Sheet --smoke-test [--smoke-test-interpreter PATH]`:
-  worker spawn bootstrap, persistent session, probe protocol, external launch and execution,
-  and explicit rejected states. Windows packaged build runs the same checks in CI, including a
-  uv-created external environment (pending a green run).
+- [x] ENV-07 Smoke-test external environments from packaged Windows and Linux applications.
+  Verified on Linux locally and on Windows CI (run 35528028534): `Sheet --smoke-test
+  [--smoke-test-interpreter PATH]` covers the worker spawn bootstrap, persistent session,
+  probe protocol, external launch and execution, and explicit rejected states; CI also
+  launches a uv-created external environment from the packaged build.
 - [x] ENV-08 Package the worker bootstrap and implement external session launch over a
   validated stdio/pipe protocol shared with the built-in session loop.
 - [x] ENV-09 Route session, console, selection, fresh-run, and restart commands through the
@@ -87,9 +87,9 @@ Task IDs are stable for future issues and commits.
 - [x] REL-01 Review the phase's acceptance criteria and mark only verified tasks complete.
 - [x] REL-02 Run `task check` and resolve lint, formatting, typing, and test failures.
 - [x] REL-03 Run `task package` and verify the native application's version and affected workflows.
-- [ ] REL-04 Validate Windows CI and process-related smoke tests where relevant.
-  CI now runs `--smoke-test` (including an external interpreter probe when a system
-  Python exists) against the packaged executable; awaiting a green Windows run.
+- [x] REL-04 Validate Windows CI and process-related smoke tests where relevant.
+  Windows CI runs the full check suite, the packaged `--smoke-test`, and a packaged
+  external-environment launch (green run 35528028534).
 - [x] REL-05 Review limits, error messages, document compatibility, and single-action undo behavior.
   Findings fixed: frozen builds no longer probe their own executable as an interpreter;
   console history is bounded; the model's undo stack is no longer Qt-parented (a
