@@ -1,11 +1,12 @@
 """Parent-side sessions that execute Python in a user-selected external interpreter.
 
-Commands travel as UTF-8 JSON lines on the child's stdin; worker messages return
-on an inherited pipe (``pass_fds``), so nothing the child prints can corrupt the
-protocol. The child's real stdout is discarded and its stderr is drained and
-surfaced when the process exits unexpectedly. Interruption sends SIGINT where
-available and otherwise escalates to termination after a grace period, matching
-the built-in session's contract.
+Commands travel as UTF-8 JSON lines on the child's stdin and worker messages
+return on its stdout; the worker redirects its raw stdout descriptor to stderr,
+so nothing user code prints can corrupt the protocol. Stray output surfaces in
+the drained stderr tail when the process exits unexpectedly. ``pass_fds`` is
+deliberately avoided because Windows subprocess does not support it.
+Interruption sends SIGINT where available and otherwise escalates to
+termination after a grace period, matching the built-in session's contract.
 """
 
 from __future__ import annotations
@@ -114,7 +115,6 @@ class ExternalScriptSession:
             self.state = SessionState.FAILED
             self._launch_error = "This build does not package the external worker bootstrap."
             return
-        read_fd, write_fd = os.pipe()
         messages: queue.Queue[dict[str, object]] = queue.Queue()
         try:
             self._process = subprocess.Popen(
@@ -124,23 +124,21 @@ class ExternalScriptSession:
                     "utf8",
                     os.fspath(external_bootstrap_path()),
                     os.fspath(external_code_directory()),
-                    str(write_fd),
                     self.session_id,
                 ],
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                pass_fds=(write_fd,),
             )
         except OSError as error:
-            os.close(read_fd)
-            os.close(write_fd)
             self._launch_error = f"Could not start {self._interpreter}: {error}"
             self.state = SessionState.FAILED
             return
-        os.close(write_fd)  # the parent keeps only the read end
         self._messages = messages
-        threading.Thread(target=self._read_messages, args=(messages, read_fd), daemon=True).start()
+        assert self._process.stdout is not None
+        threading.Thread(
+            target=self._read_messages, args=(messages, self._process.stdout), daemon=True
+        ).start()
         assert self._process.stderr is not None
         threading.Thread(
             target=self._drain_stderr, args=(self._process.stderr,), daemon=True
@@ -376,20 +374,21 @@ class ExternalScriptSession:
             except BrokenPipeError, OSError:
                 pass  # an unexpected exit is reported through poll()
 
-    def _read_messages(self, messages: queue.Queue[dict[str, object]], read_fd: int) -> None:
+    def _read_messages(self, messages: queue.Queue[dict[str, object]], stream) -> None:
         try:
-            with os.fdopen(read_fd, "r", encoding="utf-8") as stream:
-                for line in stream:
-                    try:
-                        payload = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(payload, dict):
-                        messages.put(payload)
+            for line in stream:
+                try:
+                    payload = json.loads(line.decode("utf-8", "replace"))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    messages.put(payload)
         except OSError:
             pass
         finally:
             messages.put({"kind": _EOF})
+            with suppress(OSError, ValueError):
+                stream.close()
 
     def _drain_stderr(self, stream) -> None:
         try:

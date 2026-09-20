@@ -1,10 +1,11 @@
 """Session worker for external interpreters.
 
 This module runs inside a user-selected Python interpreter, launched as
-``<interpreter> external_bootstrap.py <code directory> <message fd> <session id>``.
+``<interpreter> external_bootstrap.py <code directory> <session id>``.
 Commands arrive as UTF-8 JSON lines on stdin and worker messages leave as JSON
-lines on the inherited message pipe, so stray writes to stdout cannot corrupt
-the protocol. It reuses the same validated session loop as the built-in
+lines on stdout. The worker first redirects the raw stdout file descriptor to
+stderr, so stray writes from user code or C extensions cannot corrupt the
+protocol channel. It reuses the same validated session loop as the built-in
 multiprocessing worker.
 """
 
@@ -44,10 +45,12 @@ if os.name == "posix":
     signal.signal(signal.SIGINT, _handle_sigint)
 
 
-def main(message_fd: int, session_id: str) -> int:
+def main(session_id: str) -> int:
     from sheet.scripting import _run_session_loop
 
-    reader = sys.stdin  # text mode, UTF-8 locale from the launcher arguments
+    protocol_fd = os.dup(1)
+    os.dup2(2, 1)  # stray stdout writes are reported on stderr instead
+    reader = sys.stdin  # text mode, UTF-8 from the launcher's -X utf8
 
     def get_command() -> object:
         line = reader.readline()
@@ -60,7 +63,7 @@ def main(message_fd: int, session_id: str) -> int:
         except json.JSONDecodeError:
             return {"kind": "shutdown"}
 
-    with os.fdopen(message_fd, "w", encoding="utf-8") as messages:
+    with os.fdopen(protocol_fd, "w", encoding="utf-8") as messages:
 
         def send_message(payload: dict[str, object]) -> None:
             messages.write(json.dumps(payload) + "\n")

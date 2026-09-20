@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,12 +82,13 @@ def test_dependency_declaration_and_uv_commands_are_portable_with_spaced_paths(
     project.mkdir()
     declaration = dependency_declaration(project, {"pandas": "2.2.3", "plotly": "6.0.1"})
     operation = uv_operation(tmp_path / "uv binary", project, declaration)
+    venv_python = project / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
     assert declaration.path.name == DECLARATION_NAME
     assert "pandas==2.2.3" in declaration.content
     assert operation.commands[0] == (str(tmp_path / "uv binary"), "venv", str(project / ".venv"))
     assert operation.commands[1][-1] == str(declaration.path)
-    assert str(project / ".venv" / "bin" / "python") in command_preview(operation.commands)
+    assert str(venv_python) in command_preview(operation.commands)
 
 
 def test_uv_failure_and_absent_uv_are_safe(monkeypatch, tmp_path: Path) -> None:
