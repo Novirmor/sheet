@@ -1,15 +1,44 @@
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex
-from PySide6.QtWidgets import QMenu, QTableView
+from PySide6.QtCore import (
+    QItemSelection,
+    QItemSelectionModel,
+    QModelIndex,
+    QPersistentModelIndex,
+    Qt,
+)
+from PySide6.QtWidgets import QCompleter, QMenu, QTableView
 
 from sheet.coordinates import cell_reference, parse_cell_reference
+from sheet.formulas import FUNCTION_CATEGORIES, FUNCTION_HINTS
 from sheet.selection import bounds
 
 if TYPE_CHECKING:
     from sheet.window import MainWindow
+
+
+@dataclass(slots=True)
+class FormulaEditState:
+    origin: QPersistentModelIndex
+    original: str
+    prefix: str
+    suffix: str
+    picking_range: bool = True
+
+
+def setup_formula_assistance(window: MainWindow) -> None:
+    completer = QCompleter(sorted(FUNCTION_HINTS), window.formula_bar)
+    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+    completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+    completer.activated.connect(lambda name: _insert_completion(window, name))
+    window.formula_bar.setCompleter(completer)
+    window.formula_bar.textEdited.connect(lambda _: _update_formula_help(window))
+    _update_formula_help(window)
 
 
 def select_first_cell(window: MainWindow) -> None:
@@ -45,8 +74,9 @@ def current_cell_changed(window: MainWindow, current: QModelIndex, previous: QMo
     reference = cell_reference(current.row(), current.column())
     window.name_box.setText(reference)
     window.position_label.setText(reference)
-    if window._formula_reference_prefix is None:
+    if window.formula_edit is None:
         window.formula_bar.setText(window.workbook.raw_value(current.row(), current.column()))
+        _update_formula_help(window)
     sync_format_controls(window, current)
 
 
@@ -55,7 +85,7 @@ def selection_changed(
 ) -> None:
     del selected, deselected
     indexes = window.table.selectionModel().selectedIndexes()
-    if window._formula_reference_prefix is not None:
+    if window.formula_edit is not None and window.formula_edit.picking_range:
         insert_formula_reference(window, indexes)
     numbers = [
         float(value)
@@ -85,20 +115,30 @@ def model_changed(window: MainWindow, *args: object) -> None:
 
 
 def commit_formula_bar(window: MainWindow) -> None:
-    index = window.table.currentIndex()
+    state = window.formula_edit
+    index = state.origin if state is not None else window.table.currentIndex()
     if index.isValid():
+        window.formula_edit = None
+        _set_formula_range_highlight(window, False)
         window.model.setData(index, window.formula_bar.text())
-        stop_formula_reference(window)
-        window.table.setFocus()
+        focus_cell(window, index.row(), index.column())
+
+
+def cancel_formula_edit(window: MainWindow) -> None:
+    state = window.formula_edit
+    if state is None:
+        return
+    window.formula_edit = None
+    _set_formula_range_highlight(window, False)
+    window.formula_bar.setText(state.original)
+    _update_formula_help(window)
+    if state.origin.isValid():
+        focus_cell(window, state.origin.row(), state.origin.column())
 
 
 def function_menu(window: MainWindow) -> QMenu:
     menu = QMenu(window)
-    for label, functions in (
-        ("Math", ("SUM", "AVERAGE", "MIN", "MAX", "MEDIAN", "COUNT", "COUNTA", "ROUND", "ABS")),
-        ("Text", ("CONCAT", "LEN", "LOWER", "UPPER")),
-        ("Logic", ("IF",)),
-    ):
+    for label, functions in FUNCTION_CATEGORIES.items():
         submenu = menu.addMenu(label)
         for function in functions:
             action = submenu.addAction(function)
@@ -120,15 +160,27 @@ def start_formula_reference_from_bar(window: MainWindow) -> None:
 
 
 def begin_formula_reference(window: MainWindow, prefix: str, suffix: str) -> None:
-    window._formula_reference_prefix = prefix
-    window._formula_reference_suffix = suffix
+    state = window.formula_edit
+    if state is None:
+        origin = QPersistentModelIndex(window.table.currentIndex())
+        if not origin.isValid():
+            return
+        state = FormulaEditState(origin, window.formula_bar.text(), prefix, suffix)
+        window.formula_edit = state
+    else:
+        state.prefix = prefix
+        state.suffix = suffix
+        state.picking_range = True
     window.formula_bar.setText(f"{prefix}{suffix}")
+    _set_formula_range_highlight(window, True)
     window.formula_bar.setCursorPosition(len(prefix))
     window.formula_bar.setFocus()
+    _update_formula_help(window)
 
 
 def insert_formula_reference(window: MainWindow, indexes: list[QModelIndex]) -> None:
-    if not indexes or window._formula_reference_prefix is None:
+    state = window.formula_edit
+    if not indexes or state is None:
         return
     selected = bounds((index.row(), index.column()) for index in indexes)
     if selected is None:
@@ -136,15 +188,46 @@ def insert_formula_reference(window: MainWindow, indexes: list[QModelIndex]) -> 
     start = cell_reference(selected.top, selected.left)
     end = cell_reference(selected.bottom, selected.right)
     reference = start if start == end else f"{start}:{end}"
-    window.formula_bar.setText(
-        f"{window._formula_reference_prefix}{reference}{window._formula_reference_suffix}"
-    )
-    window.formula_bar.setCursorPosition(len(window._formula_reference_prefix) + len(reference))
+    window.formula_bar.setText(f"{state.prefix}{reference}{state.suffix}")
+    window.formula_bar.setCursorPosition(len(state.prefix) + len(reference))
+    _update_formula_help(window)
 
 
 def stop_formula_reference(window: MainWindow) -> None:
-    window._formula_reference_prefix = None
-    window._formula_reference_suffix = ""
+    if window.formula_edit is not None:
+        window.formula_edit.picking_range = False
+
+
+def _update_formula_help(window: MainWindow) -> None:
+    name = _function_name(window.formula_bar.text(), window.formula_bar.cursorPosition())
+    window.function_hint.setText(FUNCTION_HINTS.get(name, ""))
+    if name and window.formula_bar.hasFocus():
+        completer = window.formula_bar.completer()
+        if completer is not None:
+            completer.setCompletionPrefix(name)
+            completer.complete(window.formula_bar.cursorRect())
+
+
+def _function_name(text: str, position: int) -> str:
+    match = re.search(r"[A-Za-z]+$", text[:position])
+    return match.group().upper() if match and text.startswith("=") else ""
+
+
+def _insert_completion(window: MainWindow, name: str) -> None:
+    text = window.formula_bar.text()
+    position = window.formula_bar.cursorPosition()
+    match = re.search(r"[A-Za-z]+$", text[:position])
+    if match is None:
+        return
+    window.formula_bar.setText(f"{text[: match.start()]}{name}{text[position:]}")
+    window.formula_bar.setCursorPosition(match.start() + len(name))
+    _update_formula_help(window)
+
+
+def _set_formula_range_highlight(window: MainWindow, active: bool) -> None:
+    window.table.setStyleSheet(
+        "QTableView::item:selected { background: #f4b942; color: #202020; }" if active else ""
+    )
 
 
 def go_to_cell(window: MainWindow) -> None:

@@ -133,6 +133,22 @@ def _build_sheet_actions(window: MainWindow) -> None:
     window.sort_ascending_action.triggered.connect(lambda: window._sort_selection(descending=False))
     window.sort_descending_action = QAction("Sort selection descending", window)
     window.sort_descending_action.triggered.connect(lambda: window._sort_selection(descending=True))
+    window.freeze_panes_action = QAction("Freeze panes at active cell", window)
+    window.freeze_panes_action.triggered.connect(window._freeze_panes)
+    window.autofit_columns_action = QAction("Auto-fit columns", window)
+    window.autofit_columns_action.triggered.connect(window._autofit_columns)
+    window.autofit_rows_action = QAction("Auto-fit rows", window)
+    window.autofit_rows_action.triggered.connect(window._autofit_rows)
+    window.hide_rows_action = QAction("Hide selected rows", window)
+    window.hide_rows_action.triggered.connect(window._hide_rows)
+    window.hide_columns_action = QAction("Hide selected columns", window)
+    window.hide_columns_action.triggered.connect(window._hide_columns)
+    window.unhide_rows_action = QAction("Unhide all rows", window)
+    window.unhide_rows_action.triggered.connect(window._unhide_rows)
+    window.unhide_columns_action = QAction("Unhide all columns", window)
+    window.unhide_columns_action.triggered.connect(window._unhide_columns)
+    window.clear_filters_action = QAction("Clear filters", window)
+    window.clear_filters_action.triggered.connect(window._clear_filters)
 
 
 def _build_script_action(window: MainWindow, style: QStyle) -> None:

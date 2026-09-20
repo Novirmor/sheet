@@ -89,6 +89,7 @@ def export_script(workspace: ScriptWorkspace) -> None:
         QMessageBox.critical(workspace, "Could not export script", str(error))
         return
     workspace.external_paths[workspace.active_name] = selected
+    workspace.external_dirty.discard(workspace.active_name)
     workspace._update_script_state()
 
 
@@ -103,6 +104,8 @@ def save_external_script(workspace: ScriptWorkspace) -> None:
     except OSError as error:
         QMessageBox.critical(workspace, "Could not save external script", str(error))
         return
+    workspace.external_dirty.discard(workspace.active_name)
+    workspace._update_script_state()
     workspace.output.setPlainText(f"Saved external script to {path}")
 
 
@@ -118,6 +121,8 @@ def reload_external_script(workspace: ScriptWorkspace) -> None:
     workspace._set_editor_source(source)
     workspace._source_dirty = True
     workspace.sync_active_script()
+    workspace.external_dirty.discard(workspace.active_name)
+    workspace._update_script_state()
 
 
 def available_name(base: str, names: Container[str]) -> str:

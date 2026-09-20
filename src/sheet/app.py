@@ -45,6 +45,18 @@ def parse_args(arguments: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A small SQLite-backed spreadsheet")
     parser.add_argument("--version", action="store_true", help="show the application version")
     parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="run headless packaging checks and exit",
+    )
+    parser.add_argument(
+        "--smoke-test-interpreter",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="also probe this external Python interpreter during --smoke-test",
+    )
+    parser.add_argument(
         "file",
         nargs="?",
         type=Path,
@@ -61,6 +73,13 @@ def main(arguments: list[str] | None = None) -> int:
         if sys.stdout is not None:
             sys.stdout.write(f"Sheet {__version__}\n")
         return 0
+    if options.smoke_test:
+        from sheet.smoke_test import run_smoke_test
+
+        return run_smoke_test(
+            interpreter=options.smoke_test_interpreter,
+            stream=sys.stdout if sys.stdout is not None else None,
+        )
     configure_display()
     app = QApplication(sys.argv if arguments is None else [sys.argv[0], *arguments])
     app.setApplicationName("Sheet")

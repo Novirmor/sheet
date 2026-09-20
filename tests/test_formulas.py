@@ -49,6 +49,11 @@ def test_common_math_text_and_logic_functions() -> None:
     assert evaluator.evaluate("UPPER(B1)") == "HELLO"
     assert evaluator.evaluate("LEN(B1)") == 5
     assert evaluator.evaluate("IF(A1 > 0, A1, 1 / 0)") == 2
+    assert evaluator.evaluate("IFERROR(1 / 0, A1)") == 2
+    assert evaluator.evaluate("AND(A1 > 0, A2 > 0)") is True
+    assert evaluator.evaluate("OR(A1 < 0, A2 > 0)") is True
+    assert evaluator.evaluate('COUNTIF(A1:A2, ">2")') == 1
+    assert evaluator.evaluate('SUMIF(A1:A2, ">2")') == 4
 
 
 @pytest.mark.parametrize(

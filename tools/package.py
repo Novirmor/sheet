@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -44,6 +45,9 @@ def main() -> int:
         "Sheet",
         "--paths",
         "src",
+        # External interpreters import the worker-side Sheet modules from this copy.
+        "--add-data",
+        f"src{os.pathsep}src",
         "--hidden-import",
         "pandas",
         "--hidden-import",

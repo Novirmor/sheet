@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -31,6 +32,8 @@ from sheet.workbook_storage import (
 class Workbook:
     def __init__(self, path: str | Path, *, recovery_enabled: bool = True) -> None:
         self._path = Path(path) if path != ":memory:" else None
+        self._document_id = uuid.uuid4().hex
+        self.revision = 0
         self._recovery_id = uuid.uuid4().hex
         self._recovery_enabled = recovery_enabled
         self.store = SpreadsheetStore(":memory:")
@@ -67,6 +70,10 @@ class Workbook:
     @property
     def path(self) -> Path | None:
         return self._path
+
+    @property
+    def document_id(self) -> str:
+        return self._document_id
 
     @property
     def recovery_path(self) -> Path:
@@ -182,6 +189,15 @@ class Workbook:
         self.store.replace_scripts(self.scripts.items())
         self._mark_modified()
 
+    def replace_scripts(self, scripts: Mapping[str, str]) -> None:
+        """Replace stored script text atomically for one undoable editor operation."""
+        updated = dict(scripts)
+        if self.scripts == updated:
+            return
+        self.scripts = updated
+        self.store.replace_scripts(updated.items())
+        self._mark_modified()
+
     def delete_script(self, name: str) -> None:
         if name not in self.scripts:
             return
@@ -278,6 +294,7 @@ class Workbook:
         self.discard_recovery_snapshot()
 
     def _mark_modified(self) -> None:
+        self.revision += 1
         self.dirty = True
         self._update_recovery_snapshot()
 

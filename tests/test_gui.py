@@ -6,10 +6,13 @@ from PySide6.QtWidgets import QApplication, QDockWidget, QLineEdit, QStyleOption
 
 from sheet.code_editor import CodeEditor, LineNumberArea, PythonHighlighter
 from sheet.csv_io import CsvData
+from sheet.csv_worker import CsvWorker
 from sheet.model import SpreadsheetModel
-from sheet.script_dialog import ScriptWorkspace
+from sheet.script_dialog import ScriptSourcesCommand, ScriptWorkspace
+from sheet.script_execution import MAX_CONSOLE_HISTORY, run_console, stop_script
 from sheet.script_library import ScriptLibraryPanel
 from sheet.script_source import ScriptSourcePanel
+from sheet.scripting import ScriptResult, ScriptSession
 from sheet.window import NATIVE_FILE_FILTER, CellEditorDelegate, MainWindow
 from sheet.workbook import Workbook
 
@@ -80,6 +83,65 @@ def test_fx_menu_and_mouse_selection_insert_formula_ranges(application: QApplica
 
     assert window.formula_bar.text() == "=SUM(A1:B2)"
     window.close()
+
+
+def test_formula_edit_commits_to_its_original_cell_and_can_be_cancelled(
+    application: QApplication,
+) -> None:
+    window = MainWindow(":memory:")
+    window.model.set_cells({(0, 0): "old", (0, 1): "4"})
+    window._focus_cell(0, 0)
+    window._insert_function("SUM")
+    window.table.setCurrentIndex(window.model.index(0, 1))
+    window._selection_changed(QItemSelection(), QItemSelection())
+    window._commit_formula_bar()
+
+    assert window.workbook.raw_value(0, 0) == "=SUM(B1)"
+    assert window.workbook.raw_value(0, 1) == "4"
+
+    window._insert_function("SUM")
+    window._cancel_formula_edit()
+    assert window.formula_bar.text() == "=SUM(B1)"
+    window.workbook.dirty = False
+    window.close()
+
+
+def test_navigation_controls_freeze_hide_unhide_and_filter(application: QApplication) -> None:
+    window = MainWindow(":memory:")
+    window.model.set_cells({(0, 0): "Coffee", (1, 0): "Tea"})
+    window._focus_cell(1, 1)
+    window._freeze_panes()
+    assert window.table._frozen_rows == 1
+    assert window.table._frozen_columns == 1
+
+    window._select_row(1)
+    window._hide_rows()
+    assert window.table.isRowHidden(1)
+    window._unhide_rows()
+    assert not window.table.isRowHidden(1)
+
+    window.filters[0] = "coffee"
+    from sheet.window_navigation import apply_filters
+
+    apply_filters(window)
+    assert not window.table.isRowHidden(0)
+    assert window.table.isRowHidden(1)
+    window._clear_filters()
+    assert not window.table.isRowHidden(1)
+    window.workbook.dirty = False
+    window.close()
+
+
+def test_csv_worker_honors_cancellation(tmp_path: Path) -> None:
+    source = tmp_path / "source.csv"
+    source.write_text("\n".join("value" for _ in range(101)))
+    worker = CsvWorker("read", source)
+    cancelled: list[bool] = []
+    worker.cancelled.connect(lambda: cancelled.append(True))
+    worker.cancel()
+    worker.run()
+
+    assert cancelled == [True]
 
 
 def test_window_builds_expected_menus_and_toolbars(application: QApplication) -> None:
@@ -161,6 +223,31 @@ def test_script_changes_are_one_undoable_action(application: QApplication) -> No
     model.workbook.close()
 
 
+def test_stale_script_result_cannot_overwrite_changed_workbook(application: QApplication) -> None:
+    workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
+    workbook = workspace.model.workbook
+    document_id = workbook.document_id
+    snapshot_revision = workbook.revision
+    workbook.set_cell(0, 0, "newer value")
+    workspace._finish_script(
+        ScriptResult(
+            "completed",
+            {(0, 0): "script value"},
+            workbook.rows,
+            workbook.columns,
+            document_id=document_id,
+            snapshot_revision=snapshot_revision,
+            run_id="test",
+        )
+    )
+
+    assert workbook.raw_value(0, 0) == "newer value"
+    assert "not applied" in workspace.output.toPlainText()
+    workspace.model.workbook.dirty = False
+    workspace.deleteLater()
+    workspace.model.workbook.close()
+
+
 def test_script_workspace_switches_and_saves_named_scripts(
     application: QApplication, tmp_path: Path
 ) -> None:
@@ -183,6 +270,29 @@ def test_script_workspace_switches_and_saves_named_scripts(
     workbook.close()
 
 
+def test_script_symbol_undo_keeps_linked_file_unsaved(
+    application: QApplication, tmp_path: Path
+) -> None:
+    workbook = Workbook(":memory:")
+    workbook.set_script("main", "value = 1\nprint(value)")
+    workspace = ScriptWorkspace(SpreadsheetModel(workbook))
+    linked = tmp_path / "main.py"
+    linked.write_text("value = 1\nprint(value)")
+    workspace.external_paths["main"] = linked
+    updated = {"main": "amount = 1\nprint(amount)"}
+
+    workspace.model.undo_stack.push(
+        ScriptSourcesCommand(workspace, dict(workbook.scripts), updated)
+    )
+
+    assert workbook.scripts == updated
+    assert linked.read_text() == "value = 1\nprint(value)"
+    workspace.model.undo_stack.undo()
+    assert workbook.scripts["main"] == "value = 1\nprint(value)"
+    workspace.deleteLater()
+    workbook.close()
+
+
 def test_script_workspace_cannot_float_or_close(application: QApplication) -> None:
     workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
 
@@ -199,6 +309,37 @@ def test_script_workspace_reports_syntax_errors_before_starting(application: QAp
 
     assert workspace.runner is None
     assert workspace.output.toPlainText().startswith("Syntax error at line 1, column 12")
+    workspace.model.workbook.close()
+
+
+def test_script_workspace_keeps_bounded_run_history_and_clears_results(
+    application: QApplication,
+) -> None:
+    workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
+    workspace.output.setPlainText("old output")
+    workspace.variable_explorer.status.setText("variables remain")
+    for version in range(25):
+        workspace.begin_run(f"value = {version}", "console", version)
+        workspace.record_run(1, False)
+
+    assert len(workspace.run_history) == 20
+    assert workspace.run_history[0].source_version == 5
+    workspace.clear_results()
+    assert workspace.output.toPlainText() == ""
+    assert workspace.variable_explorer.status.text() == "variables remain"
+    workspace.model.workbook.close()
+
+
+def test_environment_change_stops_and_invalidates_the_python_session(
+    application: QApplication,
+) -> None:
+    workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
+    workspace.session = ScriptSession()
+
+    workspace.environment_changed(external=True)
+
+    assert workspace.session is None
+    assert "session was stopped" in workspace.output.toPlainText()
     workspace.model.workbook.close()
 
 
@@ -272,3 +413,32 @@ def test_header_selection_selects_complete_rows_and_columns(application: QApplic
     window._select_column(3)
     assert len(window.table.selectionModel().selectedIndexes()) == window.workbook.rows
     window.close()
+
+
+def test_console_history_is_bounded(application: QApplication) -> None:
+    workspace = ScriptWorkspace(SpreadsheetModel(Workbook(":memory:")))
+
+    class IdleSession(ScriptSession):
+        @property
+        def running(self) -> bool:
+            return False
+
+        def run(self, source, workbook, **kwargs):
+            return "run"
+
+        def stop(self) -> None:
+            pass
+
+    workspace.session = IdleSession()
+    try:
+        for index in range(MAX_CONSOLE_HISTORY + 5):
+            workspace.console_input.setPlainText(f"value = {index}")
+            run_console(workspace)
+
+        assert len(workspace.console_history) == MAX_CONSOLE_HISTORY
+        assert workspace.console_history[0] == "value = 5"
+        assert workspace.console_history[-1] == f"value = {MAX_CONSOLE_HISTORY + 4}"
+        assert workspace.console_history_index == len(workspace.console_history)
+    finally:
+        stop_script(workspace)
+        workspace.model.workbook.close()

@@ -45,6 +45,27 @@ jobs:
           & ".\dist\Sheet\Sheet.exe" --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          & ".\dist\Sheet\Sheet.exe" --smoke-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if ($python) {
+            & ".\dist\Sheet\Sheet.exe" --smoke-test --smoke-test-interpreter "$python"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Output "No external python found; skipped the external interpreter probe."
+          }
+
+      - name: Smoke test a packaged launch of an external environment
+        shell: pwsh
+        run: |
+          uv venv .smoke-env
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip install --python ".smoke-env\Scripts\python.exe" pandas plotly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ".\dist\Sheet\Sheet.exe" --smoke-test --smoke-test-interpreter ".smoke-env\Scripts\python.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Create distribution archive
         shell: pwsh
         run: Compress-Archive -Path "dist\Sheet\*" -DestinationPath "dist\Sheet-windows-x64.zip" -Force

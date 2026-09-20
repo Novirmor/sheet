@@ -95,7 +95,10 @@ class SpreadsheetModel(QAbstractTableModel):
     def __init__(self, workbook: Workbook) -> None:
         super().__init__()
         self.workbook = workbook
-        self.undo_stack = QUndoStack(self)
+        # Unparented on purpose: destroying a stack of Python-subclassed commands
+        # through Qt's parent-child teardown during interpreter shutdown crashes;
+        # Python-side ownership destroys commands in a supported order instead.
+        self.undo_stack = QUndoStack()
 
     def rowCount(self, parent: ModelIndex = INVALID_INDEX) -> int:
         return 0 if parent.isValid() else self.workbook.rows

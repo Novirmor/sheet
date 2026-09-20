@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QRect, QSize, QStringListModel, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QKeyEvent,
@@ -11,9 +11,13 @@ from PySide6.QtGui import (
     QResizeEvent,
     QSyntaxHighlighter,
     QTextCharFormat,
+    QTextCursor,
     QTextFormat,
 )
 from PySide6.QtWidgets import QCompleter, QPlainTextEdit, QTextEdit, QWidget
+
+from sheet.script_api import api_member, api_member_names
+from sheet.script_intelligence import Diagnostic
 
 
 class PythonHighlighter(QSyntaxHighlighter):
@@ -66,18 +70,22 @@ class LineNumberArea(QWidget):
 
 
 class CodeEditor(QPlainTextEdit):
+    assistanceChanged = Signal(str)
+
     def __init__(self, source: str) -> None:
         super().__init__(source)
         self.line_number_area = LineNumberArea(self)
-        self.completer = QCompleter(
-            ["clear", "columns", "get", "range", "raw", "rows", "set", "write"], self
-        )
+        self._completion_model = QStringListModel(self)
+        self.completer = QCompleter(self._completion_model, self)
+        self._diagnostics: tuple[Diagnostic, ...] = ()
+        self._folding_ranges: tuple[tuple[int, int], ...] = ()
         self.completer.setWidget(self)
         self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self.completer.activated.connect(self._insert_completion)
         self.blockCountChanged.connect(self._update_line_number_area_width)
         self.updateRequest.connect(self._update_line_number_area)
         self.cursorPositionChanged.connect(self._highlight_current_line)
+        self.cursorPositionChanged.connect(self._update_assistance)
         self._update_line_number_area_width(0)
         self._highlight_current_line()
 
@@ -132,11 +140,13 @@ class CodeEditor(QPlainTextEdit):
             event.ignore()
             return
         super().keyPressEvent(event)
-        prefix = self._completion_prefix()
-        if len(prefix) < 2:
+        context, prefix = self._completion_context()
+        candidates = api_member_names() if context == "sheet" else _completion_words()
+        if context != "sheet" and len(prefix) < 2:
             if popup is not None:
                 popup.hide()
             return
+        self._completion_model.setStringList(candidates)
         self.completer.setCompletionPrefix(prefix)
         if popup is None:
             return
@@ -152,6 +162,12 @@ class CodeEditor(QPlainTextEdit):
         cursor.select(cursor.SelectionType.WordUnderCursor)
         return cursor.selectedText()
 
+    def _completion_context(self) -> tuple[str, str]:
+        cursor = self.textCursor()
+        prefix = self._completion_prefix()
+        before = self.toPlainText()[: cursor.position() - len(prefix)]
+        return ("sheet" if before.endswith("sheet.") else "python"), prefix
+
     def _insert_completion(self, completion: str) -> None:
         cursor = self.textCursor()
         prefix = self._completion_prefix()
@@ -159,12 +175,74 @@ class CodeEditor(QPlainTextEdit):
         self.setTextCursor(cursor)
 
     def _highlight_current_line(self) -> None:
+        selections: list[QTextEdit.ExtraSelection] = []
         selection = QTextEdit.ExtraSelection()
         selection.format.setBackground(QColor("#f2f7ff"))
         selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
         selection.cursor = self.textCursor()
         selection.cursor.clearSelection()
-        self.setExtraSelections([selection])
+        selections.append(selection)
+        for diagnostic in self._diagnostics:
+            block = self.document().findBlockByNumber(diagnostic.line - 1)
+            if not block.isValid():
+                continue
+            error = QTextEdit.ExtraSelection()
+            error.cursor = self.textCursor()
+            error.cursor.setPosition(block.position() + max(0, diagnostic.column - 1))
+            error.cursor.movePosition(
+                QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor
+            )
+            error.format.setUnderlineColor(QColor("#d92d20"))
+            error.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.WaveUnderline)
+            error.format.setToolTip(diagnostic.message)
+            selections.append(error)
+        self.setExtraSelections(selections)
+
+    def set_diagnostics(self, diagnostics: tuple[Diagnostic, ...]) -> None:
+        self._diagnostics = diagnostics
+        self._highlight_current_line()
+
+    def set_folding_ranges(self, ranges: tuple[tuple[int, int], ...]) -> None:
+        self._folding_ranges = ranges
+
+    def toggle_fold_at_line(self, line: int) -> bool:
+        for start, end in self._folding_ranges:
+            if start != line:
+                continue
+            first = self.document().findBlockByNumber(start)
+            hidden = first.isValid() and first.next().isVisible()
+            block = first.next()
+            while block.isValid() and block.blockNumber() < end:
+                block.setVisible(not hidden)
+                block.setLineCount(0 if hidden else 1)
+                block = block.next()
+            self.document().markContentsDirty(
+                first.position(), max(1, block.position() - first.position())
+            )
+            self.viewport().update()
+            return True
+        return False
+
+    def unfold_all(self) -> None:
+        block = self.document().begin()
+        while block.isValid():
+            block.setVisible(True)
+            block.setLineCount(1)
+            block = block.next()
+        self.viewport().update()
+
+    def _update_assistance(self) -> None:
+        context, prefix = self._completion_context()
+        member = api_member(prefix) if context == "sheet" else None
+        fallback = (
+            "AST local/module navigation is available. Optional semantic backend unavailable."
+        )
+        if member is not None:
+            self.assistanceChanged.emit(f"{member.signature} - {member.description} | {fallback}")
+        elif context == "sheet" and prefix:
+            self.assistanceChanged.emit(f"No Sheet API member named {prefix}. {fallback}")
+        else:
+            self.assistanceChanged.emit(fallback)
 
     def _update_line_number_area_width(self, _: int) -> None:
         self.setViewportMargins(self.line_number_width(), 0, 0, 0)
@@ -178,3 +256,46 @@ class CodeEditor(QPlainTextEdit):
             )
         if rectangle.contains(self.viewport().rect()):
             self._update_line_number_area_width(0)
+
+
+def _completion_words() -> list[str]:
+    return [
+        "and",
+        "as",
+        "assert",
+        "async",
+        "await",
+        "break",
+        "class",
+        "continue",
+        "def",
+        "del",
+        "elif",
+        "else",
+        "except",
+        "False",
+        "finally",
+        "for",
+        "from",
+        "if",
+        "import",
+        "in",
+        "is",
+        "lambda",
+        "None",
+        "nonlocal",
+        "not",
+        "or",
+        "pass",
+        "raise",
+        "return",
+        "True",
+        "try",
+        "while",
+        "with",
+        "yield",
+        "sheet",
+        "display",
+        "pd",
+        "px",
+    ]

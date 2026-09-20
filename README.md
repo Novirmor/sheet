@@ -23,6 +23,9 @@ Sheet is a small SQLite-backed desktop spreadsheet built with Python and Qt.
 
 ## Engineering plan: keep it simple
 
+The next Python workspace features are specified in [specs/README.md](specs/README.md),
+with an implementation checklist in [specs/TASKS.md](specs/TASKS.md).
+
 New behavior is secondary to making the existing application easy to understand and change. Refactors
 must preserve behavior and pass the complete verification suite after every step.
 

@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     QEvent,
@@ -7,8 +10,9 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     Qt,
+    QThread,
 )
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -17,13 +21,13 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QProgressDialog,
-    QTableView,
     QToolButton,
 )
 
 from sheet.clipboard import copy_text, paste_rows
 from sheet.csv_io import CsvData
 from sheet.csv_transfer import import_cells
+from sheet.csv_worker import CsvWorker
 from sheet.find_dialog import FindReplaceDialog
 from sheet.model import SpreadsheetModel
 from sheet.script_dialog import ScriptWorkspace
@@ -36,7 +40,6 @@ from sheet.window_csv import (
     csv_scope,
     export_csv,
     import_csv,
-    progress_callback,
 )
 from sheet.window_document import NATIVE_FILE_FILTER as NATIVE_FILE_FILTER
 from sheet.window_document import (
@@ -60,6 +63,7 @@ from sheet.window_find import (
 from sheet.window_interaction import (
     apply_format,
     begin_formula_reference,
+    cancel_formula_edit,
     commit_formula_bar,
     current_cell_changed,
     focus_cell,
@@ -75,12 +79,24 @@ from sheet.window_interaction import (
     select_row,
     selected_indexes,
     selection_changed,
+    setup_formula_assistance,
     start_formula_reference_from_bar,
     stop_formula_reference,
     sync_format_controls,
 )
 from sheet.window_layout import CellEditorDelegate as CellEditorDelegate
-from sheet.window_layout import build_ui
+from sheet.window_layout import FrozenTableView, build_ui
+from sheet.window_navigation import (
+    autofit_columns,
+    autofit_rows,
+    clear_filters,
+    freeze_panes,
+    hide_columns,
+    hide_rows,
+    show_filter_menu,
+    unhide_columns,
+    unhide_rows,
+)
 from sheet.window_structure import (
     delete_columns,
     delete_rows,
@@ -92,6 +108,9 @@ from sheet.window_structure import (
     sort_selection,
 )
 from sheet.workbook import Workbook
+
+if TYPE_CHECKING:
+    from sheet.window_interaction import FormulaEditState
 
 
 class MainWindow(QMainWindow):
@@ -122,6 +141,17 @@ class MainWindow(QMainWindow):
     sort_ascending_action: QAction
     sort_descending_action: QAction
     script_action: QAction
+    freeze_panes_action: QAction
+    autofit_columns_action: QAction
+    autofit_rows_action: QAction
+    hide_rows_action: QAction
+    hide_columns_action: QAction
+    unhide_rows_action: QAction
+    unhide_columns_action: QAction
+    clear_filters_action: QAction
+    csv_thread: QThread | None
+    csv_worker: CsvWorker | None
+    csv_job: object | None
     view_menu: QMenu
     number_format: QComboBox
     find_dialog: FindReplaceDialog
@@ -129,16 +159,25 @@ class MainWindow(QMainWindow):
     position_label: QLabel
     summary_label: QLabel
     document_state_label: QLabel
+    table: FrozenTableView
+    function_hint: QLabel
+    formula_accept_button: QToolButton
+    formula_cancel_button: QToolButton
+    formula_edit: FormulaEditState | None
+    filters: dict[int, str]
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         super().__init__()
         self.model = SpreadsheetModel(Workbook(path))
-        self.table = QTableView()
+        self.table = FrozenTableView()
         self.name_box = QLineEdit("A1")
         self.formula_bar = QLineEdit()
         self._updating_format_controls = False
-        self._formula_reference_prefix: str | None = None
-        self._formula_reference_suffix = ""
+        self.formula_edit = None
+        self.filters = {}
+        self.csv_thread = None
+        self.csv_worker = None
+        self.csv_job = None
         self._build_ui()
         self._build_actions()
         self._build_menus()
@@ -175,7 +214,10 @@ class MainWindow(QMainWindow):
         self.name_box.returnPressed.connect(self._go_to_cell)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.viewport().installEventFilter(self)
+        self.formula_bar.installEventFilter(self)
+        setup_formula_assistance(self)
         self.table.horizontalHeader().sectionClicked.connect(self._select_column)
+        self.table.horizontalHeader().customContextMenuRequested.connect(self._show_filter_menu)
         self.table.verticalHeader().sectionClicked.connect(self._select_row)
         self.model.dataChanged.connect(self._model_changed)
         self.model.modelReset.connect(self._model_changed)
@@ -203,7 +245,42 @@ class MainWindow(QMainWindow):
     def _commit_formula_bar(self) -> None:
         commit_formula_bar(self)
 
+    def _cancel_formula_edit(self) -> None:
+        cancel_formula_edit(self)
+
+    def _freeze_panes(self) -> None:
+        freeze_panes(self)
+
+    def _autofit_columns(self) -> None:
+        autofit_columns(self)
+
+    def _autofit_rows(self) -> None:
+        autofit_rows(self)
+
+    def _hide_rows(self) -> None:
+        hide_rows(self)
+
+    def _hide_columns(self) -> None:
+        hide_columns(self)
+
+    def _unhide_rows(self) -> None:
+        unhide_rows(self)
+
+    def _unhide_columns(self) -> None:
+        unhide_columns(self)
+
+    def _clear_filters(self) -> None:
+        clear_filters(self)
+
+    def _show_filter_menu(self, position: QPoint) -> None:
+        show_filter_menu(self, position)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.formula_bar and event.type() == QEvent.Type.KeyPress:
+            key_event = event if isinstance(event, QKeyEvent) else None
+            if key_event is not None and key_event.key() == Qt.Key.Key_Escape:
+                self._cancel_formula_edit()
+                return True
         if watched is self.table.viewport():
             if event.type() == QEvent.Type.MouseButtonPress and self.formula_bar.hasFocus():
                 self._start_formula_reference_from_bar()
@@ -356,10 +433,6 @@ class MainWindow(QMainWindow):
     def _csv_progress(self, label: str) -> QProgressDialog:
         return csv_progress(self, label)
 
-    @staticmethod
-    def _progress_callback(progress: QProgressDialog):
-        return progress_callback(progress)
-
     def _select_range(self, start_row: int, start_column: int, rows: list[list[str]]) -> None:
         select_range(self, start_row, start_column, rows)
 
@@ -391,6 +464,10 @@ class MainWindow(QMainWindow):
         if not self._maybe_save_changes():
             event.ignore()
             return
+        if self.csv_worker is not None:
+            self.csv_worker.cancel()
+        if self.csv_thread is not None:
+            self.csv_thread.wait()
         self.script_workspace.stop_script()
         self.workbook.close()
         event.accept()

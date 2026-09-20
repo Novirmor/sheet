@@ -14,6 +14,8 @@ from sheet.formula_references import (
 )
 
 __all__ = [
+    "FUNCTION_CATEGORIES",
+    "FUNCTION_HINTS",
     "FormulaError",
     "FormulaEvaluator",
     "coerce_value",
@@ -27,23 +29,46 @@ type FormulaValue = CellValue | list[CellValue]
 type CellResolver = Callable[[int, int], CellValue]
 
 REFERENCE_LIKE_NAME = re.compile(r"^[A-Za-z]+[0-9]+$")
-SUPPORTED_FUNCTIONS = {
-    "SUM",
-    "AVERAGE",
-    "AVG",
-    "MIN",
-    "MAX",
-    "MEDIAN",
-    "COUNT",
-    "COUNTA",
-    "ABS",
-    "ROUND",
-    "CONCAT",
-    "LEN",
-    "LOWER",
-    "UPPER",
-    "RANGE",
+FUNCTION_CATEGORIES = {
+    "Math": (
+        "SUM",
+        "AVERAGE",
+        "MIN",
+        "MAX",
+        "MEDIAN",
+        "COUNT",
+        "COUNTA",
+        "SUMIF",
+        "COUNTIF",
+        "ROUND",
+        "ABS",
+    ),
+    "Text": ("CONCAT", "LEN", "LOWER", "UPPER"),
+    "Logic": ("IF", "IFERROR", "AND", "OR"),
 }
+FUNCTION_HINTS = {
+    "SUM": "SUM(number1, [number2], ...)",
+    "AVERAGE": "AVERAGE(number1, [number2], ...)",
+    "AVG": "AVG(number1, [number2], ...)",
+    "MIN": "MIN(number1, [number2], ...)",
+    "MAX": "MAX(number1, [number2], ...)",
+    "MEDIAN": "MEDIAN(number1, [number2], ...)",
+    "COUNT": "COUNT(value1, [value2], ...)",
+    "COUNTA": "COUNTA(value1, [value2], ...)",
+    "SUMIF": "SUMIF(range, criterion, [sum_range])",
+    "COUNTIF": "COUNTIF(range, criterion)",
+    "ROUND": "ROUND(number, [digits])",
+    "ABS": "ABS(number)",
+    "CONCAT": "CONCAT(value1, [value2], ...)",
+    "LEN": "LEN(value)",
+    "LOWER": "LOWER(text)",
+    "UPPER": "UPPER(text)",
+    "IF": "IF(condition, value_if_true, value_if_false)",
+    "IFERROR": "IFERROR(value, fallback)",
+    "AND": "AND(condition1, [condition2], ...)",
+    "OR": "OR(condition1, [condition2], ...)",
+}
+SUPPORTED_FUNCTIONS = set(FUNCTION_HINTS) | {"RANGE"}
 
 
 def coerce_value(value: str) -> CellValue:
@@ -137,15 +162,18 @@ class FormulaEvaluator:
             branch = node.body if self._truthy(self._evaluate_node(node.test)) else node.orelse
             return self._evaluate_node(branch)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
-            if node.func.id.upper() == "IF" and len(node.args) == 3:
+            name = node.func.id.upper()
+            if name == "IF" and len(node.args) == 3:
                 branch = (
                     node.args[1]
                     if self._truthy(self._evaluate_node(node.args[0]))
                     else node.args[2]
                 )
                 return self._evaluate_node(branch)
+            if name == "IFERROR" and len(node.args) == 2:
+                return self._iferror(node.args[0], node.args[1])
             arguments = [self._evaluate_node(argument) for argument in node.args]
-            return self._call(node.func.id.upper(), arguments)
+            return self._call(name, arguments)
         raise FormulaError("#ERROR!")
 
     def _resolve_name(self, name: str) -> CellValue:
@@ -190,12 +218,42 @@ class FormulaEvaluator:
             return self._range(arguments)
         if name not in SUPPORTED_FUNCTIONS:
             raise FormulaError("#NAME?")
+        if name in {"SUMIF", "COUNTIF"}:
+            return self._conditional_function(name, arguments)
         flattened = list(self._flatten(arguments))
+        if name == "AND":
+            return all(self._truthy(value) for value in flattened)
+        if name == "OR":
+            return any(self._truthy(value) for value in flattened)
         if name in {"SUM", "AVG", "AVERAGE", "MIN", "MAX", "MEDIAN", "COUNT", "ABS", "ROUND"}:
             return self._numeric_function(name, flattened)
         if name == "COUNTA":
             return sum(value is not None for value in flattened)
         return self._text_function(name, flattened)
+
+    def _iferror(self, value_node: ast.expr, fallback_node: ast.expr) -> FormulaValue:
+        try:
+            return self._scalar(self._evaluate_node(value_node))
+        except FormulaError, ZeroDivisionError:
+            return self._evaluate_node(fallback_node)
+
+    def _conditional_function(self, name: str, arguments: list[FormulaValue]) -> int | float:
+        if len(arguments) not in ({2} if name == "COUNTIF" else {2, 3}):
+            raise FormulaError("#TYPE!")
+        criteria_range, criterion = arguments[:2]
+        if not isinstance(criteria_range, list):
+            raise FormulaError("#TYPE!")
+        target_range = arguments[2] if len(arguments) == 3 else criteria_range
+        if not isinstance(target_range, list) or len(target_range) != len(criteria_range):
+            raise FormulaError("#TYPE!")
+        matched = [
+            target
+            for value, target in zip(criteria_range, target_range, strict=True)
+            if _matches_criterion(value, self._scalar(criterion))
+        ]
+        if name == "COUNTIF":
+            return len(matched)
+        return sum(self._numbers(matched))
 
     def _range(self, arguments: list[FormulaValue]) -> list[CellValue]:
         if len(arguments) != 1 or not isinstance(arguments[0], str):
@@ -291,3 +349,60 @@ class FormulaEvaluator:
                 yield int(value)
             elif isinstance(value, int | float):
                 yield value
+
+
+def _matches_criterion(value: CellValue, criterion: CellValue) -> bool:
+    if not isinstance(criterion, str):
+        return value == criterion
+    operator, target = _criterion_parts(criterion)
+    if operator is None:
+        return format_value(value).casefold() == criterion.casefold()
+    if (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and isinstance(target, int | float)
+        and not isinstance(target, bool)
+    ):
+        return _compare_numbers(operator, float(value), float(target))
+    if value is None or target is None:
+        return False
+    return _compare_text(operator, format_value(value).casefold(), format_value(target).casefold())
+
+
+def _criterion_parts(criterion: str) -> tuple[str | None, CellValue]:
+    for comparison_operator in (">=", "<=", "<>", ">", "<", "="):
+        if criterion.startswith(comparison_operator):
+            return comparison_operator, coerce_value(criterion[len(comparison_operator) :])
+    return None, criterion
+
+
+def _compare_numbers(operator: str, left: float, right: float) -> bool:
+    if operator == "=":
+        return left == right
+    if operator == "<>":
+        return left != right
+    return _ordered_number_compare(operator, left, right)
+
+
+def _compare_text(operator: str, left: str, right: str) -> bool:
+    if operator == "=":
+        return left == right
+    if operator == "<>":
+        return left != right
+    if operator == ">":
+        return left > right
+    if operator == ">=":
+        return left >= right
+    if operator == "<":
+        return left < right
+    return left <= right
+
+
+def _ordered_number_compare(operator: str, left: float, right: float) -> bool:
+    if operator == ">":
+        return left > right
+    if operator == ">=":
+        return left >= right
+    if operator == "<":
+        return left < right
+    return left <= right
