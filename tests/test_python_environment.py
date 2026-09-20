@@ -88,7 +88,8 @@ def test_dependency_declaration_and_uv_commands_are_portable_with_spaced_paths(
     assert "pandas==2.2.3" in declaration.content
     assert operation.commands[0] == (str(tmp_path / "uv binary"), "venv", str(project / ".venv"))
     assert operation.commands[1][-1] == str(declaration.path)
-    assert str(venv_python) in command_preview(operation.commands)
+    assert str(venv_python) in operation.commands[1]
+    assert json.dumps(str(venv_python))[1:-1] in command_preview(operation.commands)
 
 
 def test_uv_failure_and_absent_uv_are_safe(monkeypatch, tmp_path: Path) -> None:
